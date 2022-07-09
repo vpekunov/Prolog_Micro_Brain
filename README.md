@@ -15,3 +15,59 @@
    consult('prog.pro').
    start.
 Для выхода из интерпретатора достаточно дать команду halt.
+
+***Поддерживаемые предикаты и операции***
+= ()
+- \+
+- ;
+- =..
+- ->
+- =
+- ==
+- <
+- >
+- \=
+- is (поддерживаются + - * / и функции max, abs, round)
+- once
+- call
+- append
+- member
+- last
+- length
+- atom_length
+- nth
+- atom_concat
+- atom_chars
+- number_atom
+- number
+- consistency
+- listing
+- current_predicate
+- predicate_property
+- $predicate_property_pi
+- g_assign
+- g_read
+- fail
+- true
+- open
+- close
+- get_char
+- peek_char
+- read_token
+- write
+- nl
+- seeing
+- telling
+- seen
+- told
+- see
+- tell
+- open_url
+- track_post
+- consult
+- asserta
+- assertz
+- retract
+- retractall
+- inc
+- halt
