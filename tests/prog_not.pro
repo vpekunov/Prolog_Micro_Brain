@@ -1,0 +1,1 @@
+	start :- \+ =(2,1), write(1), fail.
