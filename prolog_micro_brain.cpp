@@ -21,6 +21,9 @@
 
 #ifdef __linux__
 #include <sys/resource.h>
+#include <unistd.h>
+#else
+#include <Windows.h>
 #endif
 
 void reverse(char s[])
@@ -127,6 +130,85 @@ public:
 	virtual void pop() { this->pop_back(); }
 	virtual T top() { return this->back();  }
 };
+
+const unsigned int mem_block_size = 1024 * 1024;
+
+typedef struct {
+	unsigned int available;
+	unsigned int top;
+	char mem[mem_block_size];
+} mem_block;
+
+typedef struct {
+	int start_offs; // Negative if is freed
+	unsigned int size;
+	char mem[10];
+} mem_header;
+
+bool fast_memory_manager = true;
+
+stack_container<mem_block *> used;
+stack_container<mem_block *> freed;
+
+void * __alloc(size_t size) {
+	unsigned int occupied = size + (sizeof(int) + sizeof(unsigned int));
+	
+	char rest = occupied % 8;
+
+	if (rest) {
+		occupied += 8 - rest;
+	}
+
+	auto new_block = [&](mem_block * m)->void * {
+		m->available = mem_block_size - occupied;
+		m->top = occupied;
+		mem_header * mm = (mem_header *)&m->mem;
+		mm->start_offs = (int)((char *)mm - (char *)m);
+		mm->size = occupied;
+
+		return &mm->mem;
+	};
+
+	auto simple_alloc = [&](mem_block * m)->void * {
+		mem_header * mm = (mem_header *)&m->mem[m->top];
+		m->available -= occupied;
+		m->top += occupied;
+		mm->start_offs = (int)((char *)mm - (char *)m);
+		mm->size = occupied;
+
+		return &mm->mem;
+	};
+
+	if (freed.size() == 0) {
+		if (used.size() == 0 || used.back()->top + occupied > mem_block_size) {
+			mem_block * m = new mem_block;
+			used.push(m);
+			return new_block(m);
+		}
+		else {
+			return simple_alloc(used.back());
+		}
+	}
+	else {
+		mem_block * m = freed.back();
+		freed.pop();
+		used.push(m);
+		return new_block(m);
+	}
+}
+
+void __free(void * ptr) {
+	mem_header * mm = (mem_header *)((char *)ptr - (sizeof(int) + sizeof(unsigned int)));
+	int offs = mm->start_offs;
+	mm->start_offs = -1;
+	mem_block * m = (mem_block *)((char *)mm - offs);
+	m->available += mm->size;
+	if (m->available == mem_block_size) {
+		used.erase(find(used.begin(), used.end(), m));
+		m->top = 0;
+		freed.push(m);
+	}
+}
 
 class string_atomizer {
 	map<string, unsigned int> hash;
@@ -261,6 +343,20 @@ public:
 
 	virtual void write(basic_ostream<char> * outs, bool simple = false) {
 		(*outs) << to_str(simple);
+	}
+
+	void * operator new (size_t size){
+		if (fast_memory_manager)
+			return __alloc(size);
+		else
+			return ::operator new(size);
+	}
+
+	void operator delete (void * ptr) {
+		if (fast_memory_manager)
+			__free(ptr);
+		else
+			::operator delete(ptr);
 	}
 };
 
@@ -5121,6 +5217,23 @@ bool interpreter::check_consistency(set<string> & dynamic_prefixes) {
 	return result;
 }
 
+#ifdef __linux__
+unsigned long long getTotalSystemMemory()
+{
+	long pages = sysconf(_SC_PHYS_PAGES);
+	long page_size = sysconf(_SC_PAGE_SIZE);
+	return (long long)pages * page_size;
+}
+#else
+unsigned long long getTotalSystemMemory()
+{
+	MEMORYSTATUSEX status;
+	status.dwLength = sizeof(status);
+	GlobalMemoryStatusEx(&status);
+	return status.ullTotalPhys;
+}
+#endif
+
 int main(int argc, char ** argv) {
 #ifdef __linux__
 	struct rlimit rl = { RLIM_INFINITY, RLIM_INFINITY };
@@ -5130,6 +5243,9 @@ int main(int argc, char ** argv) {
 		exit(1000);
 	}
 #endif
+
+	fast_memory_manager = getTotalSystemMemory() > (long long)8 * (long long) 1024 * (long long) 1024 * (long long) 1024;
+
 	if (argc == 1) {
 		interpreter prolog("", "");
 		cout << "Prolog MicroBrain by V.V.Pekunov V0.21beta" << endl;
