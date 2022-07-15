@@ -5246,7 +5246,16 @@ int main(int argc, char ** argv) {
 
 	fast_memory_manager = getTotalSystemMemory() > (long long)8 * (long long) 1024 * (long long) 1024 * (long long) 1024;
 
-	if (argc == 1) {
+	int main_part = 1;
+	while (main_part < argc) {
+		string flag = string(argv[main_part]);
+		if (flag == "--prefer-speed") fast_memory_manager = true;
+		else if (flag == "--prefer-memory") fast_memory_manager = false;
+		else break;
+		main_part++;
+	}
+
+	if (argc == main_part) {
 		interpreter prolog("", "");
 		cout << "Prolog MicroBrain by V.V.Pekunov V0.21beta" << endl;
 		cout << "  Enter 'halt.' or 'end_of_file' to exit." << endl << endl;
@@ -5307,8 +5316,8 @@ int main(int argc, char ** argv) {
 			delete f;
 		}
 	}
-	else if (argc == 4 && string(argv[1]) == "-consult") {
-		interpreter prolog(argv[2], argv[3]);
+	else if (argc - main_part == 3 && (string(argv[main_part]) == "-consult" || string(argv[main_part]) == "--consult")) {
+		interpreter prolog(argv[main_part+1], argv[main_part+2]);
 
 		if (prolog.loaded()) {
 			prolog.run();
@@ -5316,7 +5325,11 @@ int main(int argc, char ** argv) {
 		else
 			cout << "Goal absent!" << endl;
 	}
-	else
-		cout << "Usage: prolog_micro_brain.exe [-consult <file.pro> <goal_predicate_name>]" << endl;
+	else {
+		cout << "Usage: prolog_micro_brain.exe [FLAGS] [-consult <file.pro> <goal_predicate_name>]" << endl;
+		cout << "   FLAGS:" << endl;
+		cout << "      --prefer-speed    -- Accelerates program but may consume a lot of memory" << endl;
+		cout << "      --prefer-memory   -- Uses a minimal amount of memory but is slower" << endl;
+	}
 	return 0;
 }
