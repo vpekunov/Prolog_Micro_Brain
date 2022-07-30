@@ -362,58 +362,145 @@ public:
 
 class frame_item {
 private:
-	map<string, value *> vars;
+	vector<char> names;
+	
+	typedef struct {
+		char * _name;
+		value * ptr;
+	} mapper;
+
+	vector<mapper> vars;
 public:
-	frame_item() { }
+	frame_item() {
+		names.reserve(32);
+		vars.reserve(8);
+	}
+
 	~frame_item() {
-		map<string, value *>::iterator it = vars.begin();
-		while (it != vars.end()) {
-			it->second->free();
+		int it = 0;
+		while (it < vars.size()) {
+			vars[it].ptr->free();
 			it++;
 		}
 	}
 
 	void sync(frame_item * other) {
-		map<string, value *>::iterator it = other->vars.begin();
-		while (it != other->vars.end()) {
-			map<string, value *>::iterator it1 = vars.find(it->first);
-			if (it1 == vars.end())
-				vars.insert(pair<string, value *>(it->first, it->second->copy(other)));
-			else {
-				delete it1->second;
-				it1->second = it->second->copy(other);
-			}
+		int it = 0;
+		while (it < other->vars.size()) {
+			char * itc = other->vars[it]._name;
+			set(itc, other->vars[it].ptr->copy(other));
 			it++;
 		}
 	}
 
 	frame_item * copy() {
 		frame_item * result = new frame_item();
-		result->vars.clear();
-		map<string, value *>::iterator it = vars.begin();
-		while (it != vars.end()) {
-			result->vars.insert(pair<string, value *>(it->first, it->second->copy(this)));
-			it++;
+		result->names = names;
+		long long d = &result->names[0] - &names[0];
+		result->vars = vars;
+		for (mapper & m : result->vars) {
+			m.ptr = m.ptr->copy(this);
+			m._name += d;
 		}
 		return result;
 	}
 
-	map<string, value *> * get_vars() { return &vars; }
+	int get_size() { return vars.size(); }
 
-	void set(const string & name, value * v) {
-		map<string, value *>::iterator it = vars.find(name);
-		if (it != vars.end()) {
-			it->second->free();
-			it->second = v->copy(this);
+	value * at(int i) {
+		return vars[i].ptr;
+	}
+
+	char * atn(int i) {
+		return vars[i]._name;
+	}
+
+	int find(const char * what, bool & found) {
+		found = false;
+
+		if (vars.size() == 0)
+			return 0;
+		if (strcmp(what, vars[0]._name) < 0)
+			return 0;
+		if (strcmp(what, vars.back()._name) > 0)
+			return vars.size();
+		
+		int a = 0;
+		int b = vars.size() - 1;
+		while (a < b) {
+			int c = (a + b) / 2;
+			int r = strcmp(what, vars[c]._name);
+			if (r == 0) {
+				found = true;
+				return c;
+			}
+			if (r < 0)
+				b = c;
+			else
+				a = c + 1;
 		}
-		else {
-			vars[name] = v->copy(this);
+		if (strcmp(what, vars[b]._name) == 0)
+			found = true;
+		return b;
+	}
+
+	void escape(const char * name, char prepend) {
+		bool found = false;
+		int it = find(name, found);
+		if (found) {
+			char * oldp = &names[0];
+			char * s = atn(it);
+			names.insert(names.begin() + (s - oldp), prepend);
+			char * newp = &names[0];
+			char * news = newp + (s - oldp);
+			for (int i = 0; i < vars.size(); i++)
+				if (i != it)
+					if (atn(i) > s)
+						vars[i]._name += (newp - oldp) + 1;
+					else
+						vars[i]._name += (newp - oldp);
+			value * v = vars[it].ptr;
+			vars.erase(vars.begin() + it);
+
+			found = false;
+			it = find(news, found);
+			if (found) {
+				cout << "Internal FRAME collision : " << news << " already exists and can't be escaped?!" << endl;
+				exit(4000);
+			}
+			else {
+				mapper m = { news, v };
+				vars.insert(vars.begin() + it, m);
+			}
 		}
 	}
 
-	value * get(const string & name) {
-		map<string, value *>::iterator it = vars.find(name);
-		return it == vars.end() ? NULL : it->second;
+	void set(const char * name, value * v) {
+		bool found = false;
+		int it = find(name, found);
+		if (found) {
+			vars[it].ptr->free();
+			vars[it].ptr = v->copy(this);
+		}
+		else {
+			char * oldp = &names[0];
+			int oldn = names.size();
+			int n = strlen(name);
+			names.resize(oldn + n + 1);
+			char * newp = &names[0];
+			for (int i = 0; i < vars.size(); i++)
+				vars[i]._name += newp - oldp;
+			char * _name = newp + oldn;
+			strcpy(_name, name);
+			mapper m = { _name, v->copy(this) };
+			vars.insert(vars.begin() + it, m);
+		}
+	}
+
+	value * get(const char * name) {
+		bool found = false;
+		int it = find(name, found);
+		return found ? vars[it].ptr : NULL;
 	}
 };
 
@@ -441,18 +528,16 @@ public:
 	var(const string & _name) : value(), name(_name) { }
 
 	virtual void escape_vars(frame_item * ff) {
-		value * v = ff->get(name);
-		
-		if (v) ff->get_vars()->erase(name);
-		name = "$" + name;
+		value * v = ff->get(name.c_str());
 		if (v) {
 			v->escape_vars(ff);
-			ff->set(name, v);
 		}
+		ff->escape(name.c_str(), '$');
+		name = "$" + name;
 	}
 
 	virtual value * fill(frame_item * vars) {
-		value * v = vars->get(name);
+		value * v = vars->get(name.c_str());
 		if (v)
 			return v->copy(vars);
 		else {
@@ -461,7 +546,7 @@ public:
 	}
 
 	virtual value * copy(frame_item * f) {
-		value * v = f->get(name);
+		value * v = f->get(name.c_str());
 		if (v)
 			return v->copy(f);
 		else
@@ -477,11 +562,11 @@ public:
 	virtual bool unify(frame_item * ff, value * from) {
 		if (dynamic_cast<var *>(from) || dynamic_cast<any *>(from))
 			return true;
-		value * v = ff->get(name);
+		value * v = ff->get(name.c_str());
 		if (v)
 			return v->unify(ff, from);
 		else
-			ff->set(name, from);
+			ff->set(name.c_str(), from);
 		return true;
 	}
 	
@@ -533,7 +618,7 @@ public:
 	virtual value * copy(frame_item * f) { return new float_number(v); }
 	virtual bool unify(frame_item * ff, value * from) {
 		if (dynamic_cast<any *>(from)) return true;
-		if (dynamic_cast<var *>(from)) { ff->set(((var *)from)->get_name(), this); return true; }
+		if (dynamic_cast<var *>(from)) { ff->set(((var *)from)->get_name().c_str(), this); return true; }
 		if (dynamic_cast<float_number *>(from))
 			return v == ((float_number *)from)->v;
 		else if (dynamic_cast<int_number *>(from))
@@ -560,7 +645,7 @@ public:
 
 bool int_number::unify(frame_item * ff, value * from) {
 	if (dynamic_cast<any *>(from)) return true;
-	if (dynamic_cast<var *>(from)) { ff->set(((var *)from)->get_name(), this); return true; }
+	if (dynamic_cast<var *>(from)) { ff->set(((var *)from)->get_name().c_str(), this); return true; }
 	if (dynamic_cast<int_number *>(from))
 		return v == ((int_number *)from)->v;
 	else if (dynamic_cast<float_number *>(from))
@@ -626,7 +711,7 @@ public:
 	}
 	virtual bool unify(frame_item * ff, value * from) {
 		if (dynamic_cast<any *>(from)) return true;
-		if (dynamic_cast<var *>(from)) { ff->set(((var *)from)->get_name(), this); return true; }
+		if (dynamic_cast<var *>(from)) { ff->set(((var *)from)->get_name().c_str(), this); return true; }
 		if (dynamic_cast<term *>(from)) {
 			term * v2 = ((term *)from);
 			if (name != v2->name || args.size() != v2->args.size())
@@ -683,7 +768,7 @@ public:
 	}
 	virtual bool unify(frame_item * ff, value * from) {
 		if (dynamic_cast<any *>(from)) return true;
-		if (dynamic_cast<var *>(from)) { ff->set(((var *)from)->get_name(), this); return true; }
+		if (dynamic_cast<var *>(from)) { ff->set(((var *)from)->get_name().c_str(), this); return true; }
 		if (dynamic_cast<indicator *>(from)) {
 			indicator * v2 = ((indicator *)from);
 			return name == v2->name && arity == v2->arity;
@@ -865,7 +950,7 @@ public:
 			if (dynamic_cast<list *>(tag))
 				((list *)tag)->add(v);
 			else {
-				cout << "Adding to non-list tag?!" << endl;
+				std::cout << "Adding to non-list tag?!" << endl;
 				exit(1);
 			}
 		else {
@@ -905,7 +990,7 @@ public:
 	virtual bool unify(frame_item * ff, value * from) {
 		if (dynamic_cast<any *>(from)) return true;
 		if (dynamic_cast<var *>(from)) {
-			if (((var *)from)->defined()) ff->set(((var *)from)->get_name(), this);
+			if (((var *)from)->defined()) ff->set(((var *)from)->get_name().c_str(), this);
 			return true;
 		}
 		if (dynamic_cast<list *>(from)) {
@@ -1028,7 +1113,7 @@ double interpreter::evaluate(frame_item * ff, const string & expression, int & p
 	auto get_arg = [&](int & p, char ending)->double {
 		double result = evaluate(ff, expression, p);
 		if (p >= expression.length() || expression[p] != ending) {
-			cout << "Expression '" << expression << "' : '" << ending << "' expected!" << endl;
+			std::cout << "Expression '" << expression << "' : '" << ending << "' expected!" << endl;
 			exit(105);
 		}
 		p++;
@@ -1056,7 +1141,7 @@ double interpreter::evaluate(frame_item * ff, const string & expression, int & p
 				opers.pop();
 			}
 			if (opers.size() == 0) {
-				cout << "Evaluate(" << expression << ") : brackets disbalance!" << endl;
+				std::cout << "Evaluate(" << expression << ") : brackets disbalance!" << endl;
 				exit(105);
 			}
 			opers.pop();
@@ -1104,16 +1189,16 @@ double interpreter::evaluate(frame_item * ff, const string & expression, int & p
 							postfix.push(pp);
 						}
 						else {
-							cout << "Evaluation(" << expression << ") : unknown function '" << id << "'!" << endl;
+							std::cout << "Evaluation(" << expression << ") : unknown function '" << id << "'!" << endl;
 							exit(105);
 						}
 					}
 					else {
-						cout << "Evaluation(" << expression << ") : Var(" << id << ") not defined!" << endl;
+						std::cout << "Evaluation(" << expression << ") : Var(" << id << ") not defined!" << endl;
 						exit(105);
 					}
 				} else {
-					cout << "Evaluate error : " << expression << endl;
+					std::cout << "Evaluate error : " << expression << endl;
 					exit(105);
 				}
 				v->free();
@@ -1152,7 +1237,7 @@ double interpreter::evaluate(frame_item * ff, const string & expression, int & p
 	}
 
 	if (vals.size() != 1) {
-		cout << "Strange evaluation(" << expression << ")!" << endl;
+		std::cout << "Strange evaluation(" << expression << ")!" << endl;
 		exit(105);
 	}
 
@@ -1469,13 +1554,13 @@ public:
 
 	virtual generated_vars * generate_variants(frame_item * f, vector<value *> * & positional_vals) {
 		if (positional_vals->size() != 2) {
-			cout << "eq(A,B) incorrect call!" << endl;
+			std::cout << "eq(A,B) incorrect call!" << endl;
 			exit(-3);
 		}
 		var * a1 = dynamic_cast<var *>(positional_vals->at(0));
 		var * a2 = dynamic_cast<var *>(positional_vals->at(1));
 		if (a1 && a2) {
-			cout << "eq(A,B) unbounded!" << endl;
+			std::cout << "eq(A,B) unbounded!" << endl;
 			exit(-3);
 		}
 
@@ -1491,10 +1576,10 @@ public:
 			}
 		}
 		else if (a1 && !a2) {
-			r->set(a1->get_name(), positional_vals->at(1));
+			r->set(a1->get_name().c_str(), positional_vals->at(1));
 		}
 		else if (!a1 && a2) {
-			r->set(a2->get_name(), positional_vals->at(0));
+			r->set(a2->get_name().c_str(), positional_vals->at(0));
 		}
 		return result;
 	}
@@ -1508,13 +1593,13 @@ public:
 
 	virtual generated_vars * generate_variants(frame_item * f, vector<value *> * & positional_vals) {
 		if (positional_vals->size() != 2) {
-			cout << "neq(A,B) incorrect call!" << endl;
+			std::cout << "neq(A,B) incorrect call!" << endl;
 			exit(-3);
 		}
 		var * a1 = dynamic_cast<var *>(positional_vals->at(0));
 		var * a2 = dynamic_cast<var *>(positional_vals->at(1));
 		if (a1 || a2) {
-			cout << "neq(A,B) unbounded!" << endl;
+			std::cout << "neq(A,B) unbounded!" << endl;
 			exit(-3);
 		}
 
@@ -1538,14 +1623,14 @@ public:
 
 	virtual generated_vars * generate_variants(frame_item * f, vector<value *> * & positional_vals) {
 		if (positional_vals->size() != 2) {
-			cout << "less(A,B) incorrect call!" << endl;
+			std::cout << "less(A,B) incorrect call!" << endl;
 			exit(-3);
 		}
 
 		bool d1 = positional_vals->at(0)->defined();
 		bool d2 = positional_vals->at(1)->defined();
 		if (!d1 || !d2) {
-			cout << "less(A,B) unbounded!" << endl;
+			std::cout << "less(A,B) unbounded!" << endl;
 			exit(-3);
 		}
 
@@ -1581,14 +1666,14 @@ public:
 
 	virtual generated_vars * generate_variants(frame_item * f, vector<value *> * & positional_vals) {
 		if (positional_vals->size() != 2) {
-			cout << "greater(A,B) incorrect call!" << endl;
+			std::cout << "greater(A,B) incorrect call!" << endl;
 			exit(-3);
 		}
 
 		bool d1 = positional_vals->at(0)->defined();
 		bool d2 = positional_vals->at(1)->defined();
 		if (!d1 || !d2) {
-			cout << "greater(A,B) unbounded!" << endl;
+			std::cout << "greater(A,B) unbounded!" << endl;
 			exit(-3);
 		}
 
@@ -1624,13 +1709,13 @@ public:
 
 	virtual generated_vars * generate_variants(frame_item * f, vector<value *> * & positional_vals) {
 		if (positional_vals->size() != 2) {
-			cout << "inc(A,B) incorrect call!" << endl;
+			std::cout << "inc(A,B) incorrect call!" << endl;
 			exit(-3);
 		}
 		var * a1 = dynamic_cast<var *>(positional_vals->at(0));
 		var * a2 = dynamic_cast<var *>(positional_vals->at(1));
 		if (a1 && a2) {
-			cout << "inc(A,B) unbounded!" << endl;
+			std::cout << "inc(A,B) unbounded!" << endl;
 			exit(-3);
 		}
 
@@ -1653,14 +1738,14 @@ public:
 			int_number * n2 = dynamic_cast<int_number *>(positional_vals->at(1));
 			n2->dec();
 
-			r->set(a1->get_name(), n2);
+			r->set(a1->get_name().c_str(), n2);
 			n2->free();
 		}
 		else if (!a1 && a2) {
 			int_number * n1 = dynamic_cast<int_number *>(positional_vals->at(0));
 			n1->inc();
 
-			r->set(a2->get_name(), n1);
+			r->set(a2->get_name().c_str(), n1);
 			n1->free();
 		}
 		return result;
@@ -1675,7 +1760,7 @@ public:
 
 	virtual generated_vars * generate_variants(frame_item * f, vector<value *> * & positional_vals) {
 		if (positional_vals->size() != 2) {
-			cout << "=..(term,[term_id,arg1,...,argN]) incorrect call!" << endl;
+			std::cout << "=..(term,[term_id,arg1,...,argN]) incorrect call!" << endl;
 			exit(-3);
 		}
 
@@ -1683,7 +1768,7 @@ public:
 		bool d2 = positional_vals->at(1)->defined();
 
 		if (!d1 && !d2) {
-			cout << "=..(term,[term_id,arg1,...,argN]) indeterminated!" << endl;
+			std::cout << "=..(term,[term_id,arg1,...,argN]) indeterminated!" << endl;
 			exit(-3);
 		}
 
@@ -1694,7 +1779,7 @@ public:
 			value * t2 = dynamic_cast<value *>(positional_vals->at(1));
 
 			if (!t1) {
-				cout << "=..(term,[term_id,arg1,...,argN]) has incorrect parameters!" << endl;
+				std::cout << "=..(term,[term_id,arg1,...,argN]) has incorrect parameters!" << endl;
 				exit(-3);
 			}
 
@@ -1723,7 +1808,7 @@ public:
 			::list * L2 = dynamic_cast<::list *>(positional_vals->at(1));
 
 			if (!L2 || L2->size() == 0 || !dynamic_cast<term *>(L2->get_nth(1))) {
-				cout << "=..(term,[term_id,arg1,...,argN]) has incorrect parameters!" << endl;
+				std::cout << "=..(term,[term_id,arg1,...,argN]) has incorrect parameters!" << endl;
 				exit(-3);
 			}
 
@@ -1756,13 +1841,13 @@ public:
 
 	virtual generated_vars * generate_variants(frame_item * f, vector<value *> * & positional_vals) {
 		if (positional_vals->size() != 2) {
-			cout << "g_assign(Name,Val) incorrect call!" << endl;
+			std::cout << "g_assign(Name,Val) incorrect call!" << endl;
 			exit(-3);
 		}
 		term * a1 = dynamic_cast<term *>(positional_vals->at(0));
 		value * a2 = dynamic_cast<value *>(positional_vals->at(1));
 		if (!a1 || !a1->defined() || a1->get_args().size() > 0 || !a2 || !a2->defined()) {
-			cout << "g_assign(Name,Val) indeterminated!" << endl;
+			std::cout << "g_assign(Name,Val) indeterminated!" << endl;
 			exit(-3);
 		}
 
@@ -1784,13 +1869,13 @@ public:
 
 	virtual generated_vars * generate_variants(frame_item * f, vector<value *> * & positional_vals) {
 		if (positional_vals->size() != 2) {
-			cout << "g_read(Name,A) incorrect call!" << endl;
+			std::cout << "g_read(Name,A) incorrect call!" << endl;
 			exit(-3);
 		}
 		term * a1 = dynamic_cast<term *>(positional_vals->at(0));
 		value * a2 = dynamic_cast<value *>(positional_vals->at(1));
 		if (!a1 || !a1->defined() || a1->get_args().size() > 0 || !a2) {
-			cout << "g_read(Name,A) indeterminated!" << endl;
+			std::cout << "g_read(Name,A) indeterminated!" << endl;
 			exit(-3);
 		}
 
@@ -1859,7 +1944,7 @@ public:
 		double _res = prolog->evaluate(f, expression, p);
 
 		if (p < expression.length()) {
-			cout << "'is' evaluation : can't understand the following : '" << expression.substr(p) << "'" << endl;
+			std::cout << "'is' evaluation : can't understand the following : '" << expression.substr(p) << "'" << endl;
 			exit(2000);
 		}
 
@@ -1870,9 +1955,9 @@ public:
 			res = new float_number(_res);
 
 		frame_item * ff = f->copy();
-		value * v = f->get(var_name);
+		value * v = f->get(var_name.c_str());
 		if (!v || !v->defined()) {
-			ff->set(var_name, res);
+			ff->set(var_name.c_str(), res);
 			result->push_back(ff);
 		} else if (v->unify(ff, res))
 			result->push_back(ff);
@@ -2028,7 +2113,7 @@ public:
 
 	virtual generated_vars * generate_variants(frame_item * f, vector<value *> * & positional_vals) {
 		if (positional_vals->size() != 3) {
-			cout << "append(A,B,C) incorrect call!" << endl;
+			std::cout << "append(A,B,C) incorrect call!" << endl;
 			exit(-3);
 		}
 		d1 = positional_vals->at(0)->defined();
@@ -2157,14 +2242,14 @@ public:
 
 	virtual generated_vars * generate_variants(frame_item * f, vector<value *> * & positional_vals) {
 		if (positional_vals->size() != 3) {
-			cout << "atom_concat(A,B,C) incorrect call!" << endl;
+			std::cout << "atom_concat(A,B,C) incorrect call!" << endl;
 			exit(-3);
 		}
 		d1 = positional_vals->at(0)->defined();
 		d2 = positional_vals->at(1)->defined();
 		d3 = positional_vals->at(2)->defined();
 		if (!d1 && !d2 && !d3) {
-			cout << "atom_concat(A,B,C) indeterminated!" << endl;
+			std::cout << "atom_concat(A,B,C) indeterminated!" << endl;
 			exit(-3);
 		}
 
@@ -2186,13 +2271,13 @@ public:
 
 	virtual generated_vars * generate_variants(frame_item * f, vector<value *> * & positional_vals) {
 		if (positional_vals->size() != 2) {
-			cout << "atom_chars(A,B) incorrect call!" << endl;
+			std::cout << "atom_chars(A,B) incorrect call!" << endl;
 			exit(-3);
 		}
 		bool d1 = positional_vals->at(0)->defined();
 		bool d2 = positional_vals->at(1)->defined();
 		if (!d1 && !d2) {
-			cout << "atom_chars(A,B) indeterminated!" << endl;
+			std::cout << "atom_chars(A,B) indeterminated!" << endl;
 			exit(-3);
 		}
 
@@ -2275,13 +2360,13 @@ public:
 
 	virtual generated_vars * generate_variants(frame_item * f, vector<value *> * & positional_vals) {
 		if (positional_vals->size() != 2) {
-			cout << "number_atom(A,B) incorrect call!" << endl;
+			std::cout << "number_atom(A,B) incorrect call!" << endl;
 			exit(-3);
 		}
 		bool d1 = positional_vals->at(0)->defined();
 		bool d2 = positional_vals->at(1)->defined();
 		if (!d1 && !d2) {
-			cout << "number_atom(A,B) indeterminated!" << endl;
+			std::cout << "number_atom(A,B) indeterminated!" << endl;
 			exit(-3);
 		}
 
@@ -2349,12 +2434,12 @@ public:
 
 	virtual generated_vars * generate_variants(frame_item * f, vector<value *> * & positional_vals) {
 		if (positional_vals->size() != 1) {
-			cout << "number(A) incorrect call!" << endl;
+			std::cout << "number(A) incorrect call!" << endl;
 			exit(-3);
 		}
 		bool d1 = positional_vals->at(0)->defined();
 		if (!d1) {
-			cout << "number(A) indeterminated!" << endl;
+			std::cout << "number(A) indeterminated!" << endl;
 			exit(-3);
 		}
 
@@ -2380,12 +2465,12 @@ public:
 
 	virtual generated_vars * generate_variants(frame_item * f, vector<value *> * & positional_vals) {
 		if (positional_vals->size() != 1) {
-			cout << "open_url(URL|URLList) incorrect call!" << endl;
+			std::cout << "open_url(URL|URLList) incorrect call!" << endl;
 			exit(-3);
 		}
 		bool d1 = positional_vals->at(0)->defined();
 		if (!d1) {
-			cout << "open_url(URL|URLList) indeterminated!" << endl;
+			std::cout << "open_url(URL|URLList) indeterminated!" << endl;
 			exit(-3);
 		}
 
@@ -2435,12 +2520,12 @@ public:
 
 	virtual generated_vars * generate_variants(frame_item * f, vector<value *> * & positional_vals) {
 		if (positional_vals->size() != 1) {
-			cout << "track_post(ID|IDList) incorrect call!" << endl;
+			std::cout << "track_post(ID|IDList) incorrect call!" << endl;
 			exit(-3);
 		}
 		bool d1 = positional_vals->at(0)->defined();
 		if (!d1) {
-			cout << "track_post(ID|IDList) indeterminated!" << endl;
+			std::cout << "track_post(ID|IDList) indeterminated!" << endl;
 			exit(-3);
 		}
 
@@ -2492,17 +2577,17 @@ public:
 
 	virtual generated_vars * generate_variants(frame_item * f, vector<value *> * & positional_vals) {
 		if (positional_vals->size() != 1) {
-			cout << "consistency(PrefixesList) incorrect call!" << endl;
+			std::cout << "consistency(PrefixesList) incorrect call!" << endl;
 			exit(-3);
 		}
 		bool d1 = positional_vals->at(0)->defined();
 		if (!d1) {
-			cout << "consistency(PrefixesList) indeterminated!" << endl;
+			std::cout << "consistency(PrefixesList) indeterminated!" << endl;
 			exit(-3);
 		}
 		::list * L1 = dynamic_cast<::list *>(positional_vals->at(0));
 		if (!L1) {
-			cout << "consistency(PrefixesList) has incorrect parameter!" << endl;
+			std::cout << "consistency(PrefixesList) has incorrect parameter!" << endl;
 			exit(-3);
 		}
 
@@ -2534,12 +2619,12 @@ public:
 
 	virtual generated_vars * generate_variants(frame_item * f, vector<value *> * & positional_vals) {
 		if (positional_vals->size() != 2) {
-			cout << "last(L,A) incorrect call!" << endl;
+			std::cout << "last(L,A) incorrect call!" << endl;
 			exit(-3);
 		}
 		bool d1 = positional_vals->at(0)->defined();
 		if (!d1) {
-			cout << "last(L,A) indeterminated!" << endl;
+			std::cout << "last(L,A) indeterminated!" << endl;
 			exit(-3);
 		}
 
@@ -2547,7 +2632,7 @@ public:
 		::list * L1 = dynamic_cast<::list *>(positional_vals->at(0));
 
 		if (!L1) {
-			cout << "last(L,A) : L is not a list!" << endl;
+			std::cout << "last(L,A) : L is not a list!" << endl;
 			exit(-3);
 		}
 
@@ -2601,7 +2686,7 @@ public:
 
 	virtual generated_vars * generate_variants(frame_item * f, vector<value *> * & positional_vals) {
 		if (positional_vals->size() != 2) {
-			cout << "member(A,L) incorrect call!" << endl;
+			std::cout << "member(A,L) incorrect call!" << endl;
 			exit(-3);
 		}
 		d1 = positional_vals->at(0)->defined();
@@ -2630,12 +2715,12 @@ public:
 
 	virtual generated_vars * generate_variants(frame_item * f, vector<value *> * & positional_vals) {
 		if (positional_vals->size() != 2) {
-			cout << "length(L,A) incorrect call!" << endl;
+			std::cout << "length(L,A) incorrect call!" << endl;
 			exit(-3);
 		}
 		bool d1 = positional_vals->at(0)->defined();
 		if (!d1) {
-			cout << "length(L,A) indeterminated!" << endl;
+			std::cout << "length(L,A) indeterminated!" << endl;
 			exit(-3);
 		}
 
@@ -2643,7 +2728,7 @@ public:
 		::list * L1 = dynamic_cast<::list *>(positional_vals->at(0));
 
 		if (!L1) {
-			cout << "length(L,A) : L is not a list!" << endl;
+			std::cout << "length(L,A) : L is not a list!" << endl;
 			exit(-3);
 		}
 
@@ -2678,12 +2763,12 @@ public:
 
 	virtual generated_vars * generate_variants(frame_item * f, vector<value *> * & positional_vals) {
 		if (positional_vals->size() != 2) {
-			cout << "atom_length(A,N) incorrect call!" << endl;
+			std::cout << "atom_length(A,N) incorrect call!" << endl;
 			exit(-3);
 		}
 		bool d1 = positional_vals->at(0)->defined();
 		if (!d1) {
-			cout << "atom_length(A,N) indeterminated!" << endl;
+			std::cout << "atom_length(A,N) indeterminated!" << endl;
 			exit(-3);
 		}
 
@@ -2691,7 +2776,7 @@ public:
 		::term * T1 = dynamic_cast<::term *>(positional_vals->at(0));
 
 		if (!T1 || T1->get_args().size() > 0) {
-			cout << "atom_length(A,N) : A is not a simple atom!" << endl;
+			std::cout << "atom_length(A,N) : A is not a simple atom!" << endl;
 			exit(-3);
 		}
 
@@ -2726,14 +2811,14 @@ public:
 
 	virtual generated_vars * generate_variants(frame_item * f, vector<value *> * & positional_vals) {
 		if (positional_vals->size() != 3) {
-			cout << "nth(Index,L,A) incorrect call!" << endl;
+			std::cout << "nth(Index,L,A) incorrect call!" << endl;
 			exit(-3);
 		}
 		bool d1 = positional_vals->at(0)->defined();
 		bool d2 = positional_vals->at(1)->defined();
 		bool d3 = positional_vals->at(2)->defined();
 		if (!d2 || !d1 && !d3) {
-			cout << "nth(Index,L,A) indeterminated!" << endl;
+			std::cout << "nth(Index,L,A) indeterminated!" << endl;
 			exit(-3);
 		}
 
@@ -2746,7 +2831,7 @@ public:
 		::value * V3 = dynamic_cast<::value *>(positional_vals->at(2));
 
 		if (!L2 || !ANY1 && !VAR1 && !NUM1) {
-			cout << "nth(Index,L,A) : incorrect params!" << endl;
+			std::cout << "nth(Index,L,A) : incorrect params!" << endl;
 			exit(-3);
 		}
 
@@ -2802,17 +2887,17 @@ public:
 
 	virtual generated_vars * generate_variants(frame_item * f, vector<value *> * & positional_vals) {
 		if (positional_vals->size() != 1) {
-			cout << "listing(A/n) incorrect call!" << endl;
+			std::cout << "listing(A/n) incorrect call!" << endl;
 			exit(-3);
 		}
 		bool d1 = positional_vals->at(0)->defined();
 		indicator * t = dynamic_cast<indicator *>(positional_vals->at(0));
 		if (!d1) {
-			cout << "listing(A/n) indeterminated!" << endl;
+			std::cout << "listing(A/n) indeterminated!" << endl;
 			exit(-3);
 		}
 		if (!t) {
-			cout << "listing(A/n) has incorrect parameter!" << endl;
+			std::cout << "listing(A/n) has incorrect parameter!" << endl;
 			exit(-3);
 		}
 
@@ -2843,7 +2928,7 @@ public:
 
 	virtual generated_vars * generate_variants(frame_item * f, vector<value *> * & positional_vals) {
 		if (positional_vals->size() != 1) {
-			cout << "current_predicate(A/n) incorrect call!" << endl;
+			std::cout << "current_predicate(A/n) incorrect call!" << endl;
 			exit(-3);
 		}
 
@@ -2854,7 +2939,7 @@ public:
 		if (d1) {
 			indicator * t = dynamic_cast<indicator *>(positional_vals->at(0));
 			if (!t) {
-				cout << "current_predicate(A/n) has incorrect parameter!" << endl;
+				std::cout << "current_predicate(A/n) has incorrect parameter!" << endl;
 				exit(-3);
 			}
 			map< string, vector<term *> *>::iterator it = prolog->DB.begin();
@@ -2948,7 +3033,7 @@ public:
 
 	virtual generated_vars * generate_variants(frame_item * f, vector<value *> * & positional_vals) {
 		if (positional_vals->size() != 2) {
-			cout << "predicate_property(pred(_,...,_),Prop) incorrect call!" << endl;
+			std::cout << "predicate_property(pred(_,...,_),Prop) incorrect call!" << endl;
 			exit(-3);
 		}
 
@@ -2975,7 +3060,7 @@ public:
 
 	virtual generated_vars * generate_variants(frame_item * f, vector<value *> * & positional_vals) {
 		if (positional_vals->size() != 2) {
-			cout << "'$predicate_property_pi'(A/n,Prop) incorrect call!" << endl;
+			std::cout << "'$predicate_property_pi'(A/n,Prop) incorrect call!" << endl;
 			exit(-3);
 		}
 
@@ -3001,12 +3086,12 @@ public:
 
 	virtual generated_vars * generate_variants(frame_item * f, vector<value *> * & positional_vals) {
 		if (positional_vals->size() != 1) {
-			cout << "consult(FName) incorrect call!" << endl;
+			std::cout << "consult(FName) incorrect call!" << endl;
 			exit(-3);
 		}
 		bool d1 = positional_vals->at(0)->defined();
 		if (!d1) {
-			cout << "consult(FName) indeterminated!" << endl;
+			std::cout << "consult(FName) indeterminated!" << endl;
 			exit(-3);
 		}
 
@@ -3029,14 +3114,14 @@ public:
 
 	virtual generated_vars * generate_variants(frame_item * f, vector<value *> * & positional_vals) {
 		if (positional_vals->size() != 3) {
-			cout << "open(fName,mode,S) incorrect call!" << endl;
+			std::cout << "open(fName,mode,S) incorrect call!" << endl;
 			exit(-3);
 		}
 		bool d1 = positional_vals->at(0)->defined();
 		bool d2 = positional_vals->at(1)->defined();
 		bool d3 = positional_vals->at(2)->defined();
 		if (!d1 || !d2 || d3) {
-			cout << "open(fName,mode,S) incorrect params!" << endl;
+			std::cout << "open(fName,mode,S) incorrect params!" << endl;
 			exit(-3);
 		}
 
@@ -3067,12 +3152,12 @@ public:
 
 	virtual generated_vars * generate_variants(frame_item * f, vector<value *> * & positional_vals) {
 		if (positional_vals->size() != 1) {
-			cout << "close(S) incorrect call!" << endl;
+			std::cout << "close(S) incorrect call!" << endl;
 			exit(-3);
 		}
 		bool d1 = positional_vals->at(0)->defined();
 		if (!d1) {
-			cout << "close(S) : undefined parameter!" << endl;
+			std::cout << "close(S) : undefined parameter!" << endl;
 			exit(-3);
 		}
 
@@ -3095,12 +3180,12 @@ public:
 
 	virtual generated_vars * generate_variants(frame_item * f, vector<value *> * & positional_vals) {
 		if (positional_vals->size() < 1 || positional_vals->size() > 2) {
-			cout << "write(A)/write(S,A) incorrect call!" << endl;
+			std::cout << "write(A)/write(S,A) incorrect call!" << endl;
 			exit(-3);
 		}
 		bool d1 = positional_vals->at(0)->defined();
 		if (!d1 || positional_vals->size() == 2 && !positional_vals->at(1)->defined()) {
-			cout << "write(A)/write(S,A) indeterminated!" << endl;
+			std::cout << "write(A)/write(S,A) indeterminated!" << endl;
 			exit(-3);
 		}
 		if (positional_vals->size() == 1)
@@ -3127,7 +3212,7 @@ public:
 
 	virtual generated_vars * generate_variants(frame_item * f, vector<value *> * & positional_vals) {
 		if (positional_vals->size() > 1) {
-			cout << "nl/nl(S) incorrect call!" << endl;
+			std::cout << "nl/nl(S) incorrect call!" << endl;
 			exit(-3);
 		}
 
@@ -3155,12 +3240,12 @@ public:
 
 	virtual generated_vars * generate_variants(frame_item * f, vector<value *> * & positional_vals) {
 		if (positional_vals->size() > 1) {
-			cout << "tell(FName) incorrect call!" << endl;
+			std::cout << "tell(FName) incorrect call!" << endl;
 			exit(-3);
 		}
 
 		if (!positional_vals->at(0)->defined()) {
-			cout << "tell(FName) indeterminated!" << endl;
+			std::cout << "tell(FName) indeterminated!" << endl;
 			exit(-3);
 		}
 
@@ -3183,12 +3268,12 @@ public:
 
 	virtual generated_vars * generate_variants(frame_item * f, vector<value *> * & positional_vals) {
 		if (positional_vals->size() > 1) {
-			cout << "see(FName) incorrect call!" << endl;
+			std::cout << "see(FName) incorrect call!" << endl;
 			exit(-3);
 		}
 
 		if (!positional_vals->at(0)->defined()) {
-			cout << "see(FName) indeterminated!" << endl;
+			std::cout << "see(FName) indeterminated!" << endl;
 			exit(-3);
 		}
 
@@ -3211,7 +3296,7 @@ public:
 
 	virtual generated_vars * generate_variants(frame_item * f, vector<value *> * & positional_vals) {
 		if (positional_vals->size() > 1) {
-			cout << "telling(FName) incorrect call!" << endl;
+			std::cout << "telling(FName) incorrect call!" << endl;
 			exit(-3);
 		}
 
@@ -3242,7 +3327,7 @@ public:
 
 	virtual generated_vars * generate_variants(frame_item * f, vector<value *> * & positional_vals) {
 		if (positional_vals->size() > 1) {
-			cout << "seeing(FName) incorrect call!" << endl;
+			std::cout << "seeing(FName) incorrect call!" << endl;
 			exit(-3);
 		}
 
@@ -3273,13 +3358,13 @@ public:
 
 	virtual generated_vars * generate_variants(frame_item * f, vector<value *> * & positional_vals) {
 		if (positional_vals->size() > 0) {
-			cout << "told/0 incorrect call!" << endl;
+			std::cout << "told/0 incorrect call!" << endl;
 			exit(-3);
 		}
 
 		if (prolog->current_output != STD_OUTPUT)
 			dynamic_cast<basic_ofstream<char> *>(prolog->outs)->close();
-		prolog->outs = &cout;
+		prolog->outs = &std::cout;
 		prolog->current_output = STD_OUTPUT;
 
 		generated_vars * result = new generated_vars();
@@ -3299,7 +3384,7 @@ public:
 
 	virtual generated_vars * generate_variants(frame_item * f, vector<value *> * & positional_vals) {
 		if (positional_vals->size() > 0) {
-			cout << "seen/0 incorrect call!" << endl;
+			std::cout << "seen/0 incorrect call!" << endl;
 			exit(-3);
 		}
 
@@ -3327,13 +3412,13 @@ public:
 
 	virtual generated_vars * generate_variants(frame_item * f, vector<value *> * & positional_vals) {
 		if (positional_vals->size() != 2) {
-			cout << (peek ? "peek" : "get") << "_char(S,A) incorrect call!" << endl;
+			std::cout << (peek ? "peek" : "get") << "_char(S,A) incorrect call!" << endl;
 			exit(-3);
 		}
 		bool d1 = positional_vals->at(0)->defined();
 		bool d2 = positional_vals->at(1)->defined();
 		if (!d1) {
-			cout << (peek ? "peek" : "get") << "_char(S,A) : S is indeterminated!" << endl;
+			std::cout << (peek ? "peek" : "get") << "_char(S,A) : S is indeterminated!" << endl;
 			exit(-3);
 		}
 
@@ -3385,13 +3470,13 @@ public:
 
 	virtual generated_vars * generate_variants(frame_item * f, vector<value *> * & positional_vals) {
 		if (positional_vals->size() != 2) {
-			cout << "read_token(S,A) incorrect call!" << endl;
+			std::cout << "read_token(S,A) incorrect call!" << endl;
 			exit(-3);
 		}
 		bool d1 = positional_vals->at(0)->defined();
 		bool d2 = positional_vals->at(1)->defined();
 		if (!d1) {
-			cout << "read_token(S,A) : S is indeterminated!" << endl;
+			std::cout << "read_token(S,A) : S is indeterminated!" << endl;
 			exit(-3);
 		}
 
@@ -3490,19 +3575,19 @@ public:
 
 	virtual generated_vars * generate_variants(frame_item * f, vector<value *> * & positional_vals) {
 		if (positional_vals->size() != 1) {
-			cout << "assert(A) incorrect call!" << endl;
+			std::cout << "assert(A) incorrect call!" << endl;
 			exit(-3);
 		}
 		bool d1 = positional_vals->at(0)->defined();
 		if (!d1) {
-			cout << "assert(A) indeterminated!" << endl;
+			std::cout << "assert(A) indeterminated!" << endl;
 			exit(-3);
 		}
 
 		generated_vars * result = new generated_vars();
 		term * t = dynamic_cast<term *>(positional_vals->at(0));
 		if (!t) {
-			cout << "assert(A) : A is not a term!" << endl;
+			std::cout << "assert(A) : A is not a term!" << endl;
 			exit(-3);
 		}
 
@@ -3542,14 +3627,14 @@ public:
 
 	virtual generated_vars * generate_variants(frame_item * f, vector<value *> * & positional_vals) {
 		if (positional_vals->size() != 1) {
-			cout << "retract[all](A) incorrect call!" << endl;
+			std::cout << "retract[all](A) incorrect call!" << endl;
 			exit(-3);
 		}
 
 		generated_vars * result = new generated_vars();
 		term * t = dynamic_cast<term *>(positional_vals->at(0));
 		if (!t) {
-			cout << "retract[all](A) : A is not a term!" << endl;
+			std::cout << "retract[all](A) : A is not a term!" << endl;
 			exit(-3);
 		}
 
@@ -3658,7 +3743,7 @@ public:
 				dummy->free();
 			}
 			else {
-				cout << "Predicate [" << id << "] is neither standard nor dynamic!" << endl;
+				std::cout << "Predicate [" << id << "] is neither standard nor dynamic!" << endl;
 				exit(500);
 			}
 
@@ -3682,7 +3767,7 @@ public:
 		predicate_item * next = get_next(variant);
 		/**/
 		if (built_flag){
-			cout << this->get_id() << "[" << variant << "]" << endl;
+			std::cout << this->get_id() << "[" << variant << "]" << endl;
 		}
 		if (variant == 0) {
 			prolog->PARENT_CALLS.push(this);
@@ -3885,7 +3970,7 @@ value * interpreter::parse(bool exit_on_error, bool parse_complex_terms, frame_i
 				value * v = parse(exit_on_error, true, ff, s, p);
 				if (p >= s.length() || v == NULL) {
 					if (exit_on_error) {
-						cout << "[" << s.substr(oldp, p - oldp) << "] : incorrect list!" << endl;
+						std::cout << "[" << s.substr(oldp, p - oldp) << "] : incorrect list!" << endl;
 						exit(-1);
 					}
 					else
@@ -3894,7 +3979,7 @@ value * interpreter::parse(bool exit_on_error, bool parse_complex_terms, frame_i
 				((::list *)result)->add(v);
 				if (!bypass_spaces(s, p)) {
 					if (exit_on_error) {
-						cout << "[" << s.substr(oldp, p - oldp) << "] : incorrect list!" << endl;
+						std::cout << "[" << s.substr(oldp, p - oldp) << "] : incorrect list!" << endl;
 						exit(-1);
 					}
 					else
@@ -3903,7 +3988,7 @@ value * interpreter::parse(bool exit_on_error, bool parse_complex_terms, frame_i
 				if (s[p] == ',') p++;
 				else if (s[p] != ']' && s[p] != '|') {
 					if (exit_on_error) {
-						cout << "[" << s.substr(oldp, p - oldp) << "] : incorrect list!" << endl;
+						std::cout << "[" << s.substr(oldp, p - oldp) << "] : incorrect list!" << endl;
 						exit(-1);
 					}
 					else
@@ -3917,7 +4002,7 @@ value * interpreter::parse(bool exit_on_error, bool parse_complex_terms, frame_i
 					dynamic_cast<float_number *>(t) != NULL || dynamic_cast<term *>(t) != NULL ||
 					dynamic_cast<indicator *>(t) != NULL) {
 					if (exit_on_error) {
-						cout << "[" << s.substr(oldp, p - oldp) << "] : incorrect tag of list!" << endl;
+						std::cout << "[" << s.substr(oldp, p - oldp) << "] : incorrect tag of list!" << endl;
 						exit(-1);
 					}
 					else
@@ -3928,7 +4013,7 @@ value * interpreter::parse(bool exit_on_error, bool parse_complex_terms, frame_i
 				if (bypass_spaces(s, p) && s[p] == ']') p++;
 				else {
 					if (exit_on_error) {
-						cout << "[" << s.substr(oldp, p - oldp) << "] : incorrect tag of list!" << endl;
+						std::cout << "[" << s.substr(oldp, p - oldp) << "] : incorrect tag of list!" << endl;
 						exit(-1);
 					}
 					else
@@ -3943,8 +4028,10 @@ value * interpreter::parse(bool exit_on_error, bool parse_complex_terms, frame_i
 				(s[p] >= 'A' && s[p] <= 'Z' || s[p] >= 'a' && s[p] <= 'z' || s[p] >= '0' && s[p] <= '9' ||
 				 s[p] == '_'))
 				st += s[p++];
-			if (ff->get_vars()->find(st) != ff->get_vars()->end())
-				result = ff->get_vars()->at(st)->copy(ff);
+			bool found = false;
+			int it = ff->find(st.c_str(), found);
+			if (found)
+				result = ff->at(it)->copy(ff);
 			else
 				result = new var(st);
 		}
@@ -3982,7 +4069,7 @@ value * interpreter::parse(bool exit_on_error, bool parse_complex_terms, frame_i
 						value * v = parse(exit_on_error, true, ff, s, p);
 						if (p >= s.length() || v == NULL) {
 							if (exit_on_error) {
-								cout << "(" << s.substr(oldp, p - oldp) << ") : incorrect term!" << endl;
+								std::cout << "(" << s.substr(oldp, p - oldp) << ") : incorrect term!" << endl;
 								exit(-1);
 							}
 							else
@@ -3992,7 +4079,7 @@ value * interpreter::parse(bool exit_on_error, bool parse_complex_terms, frame_i
 						v->free();
 						if (!bypass_spaces(s, p)) {
 							if (exit_on_error) {
-								cout << "(" << s.substr(oldp, p - oldp) << ") : incorrect term!" << endl;
+								std::cout << "(" << s.substr(oldp, p - oldp) << ") : incorrect term!" << endl;
 								exit(-1);
 							}
 							else
@@ -4001,7 +4088,7 @@ value * interpreter::parse(bool exit_on_error, bool parse_complex_terms, frame_i
 						if (s[p] == ',') p++;
 						else if (s[p] != ')') {
 							if (exit_on_error) {
-								cout << "(" << s.substr(oldp, p - oldp) << ") : incorrect term!" << endl;
+								std::cout << "(" << s.substr(oldp, p - oldp) << ") : incorrect term!" << endl;
 								exit(-1);
 							}
 							else
@@ -4017,7 +4104,7 @@ value * interpreter::parse(bool exit_on_error, bool parse_complex_terms, frame_i
 	}
 	else {
 		if (exit_on_error) {
-			cout << "parse : syntax error!" << endl;
+			std::cout << "parse : syntax error!" << endl;
 			exit(-2);
 		}
 		else
@@ -4152,7 +4239,7 @@ bool interpreter::process(bool neg, clause * this_clause, predicate_item * p, fr
 	int i = 0;
 	/**/
 	if (built_flag){
-		cout << "entering process: ";
+		std::cout << "entering process: ";
 	}
 	if (variants || neg_standard) {
 		FLAGS.push_back((p && p->is_once() ? once_flag : 0) + (p && p->is_call() ? call_flag : 0));
@@ -4166,7 +4253,7 @@ bool interpreter::process(bool neg, clause * this_clause, predicate_item * p, fr
 			ptrTRACE.push(i);
 			/**/
 			if (built_flag){
-				cout << (p ? p->get_id() : "END") << "[" << i << "]" << endl;
+				std::cout << (p ? p->get_id() : "END") << "[" << i << "]" << endl;
 				cin.get();
 			}
 			if (user && !user->is_dynamic()) {
@@ -4174,7 +4261,7 @@ bool interpreter::process(bool neg, clause * this_clause, predicate_item * p, fr
 					if (user->processing(neg, i, variants, positional_vals, ff)) {
 						/**/
 						if (built_flag){
-							cout << "true ret to " << (p ? p->get_id() : "END") << "[" << i << "]" << endl;
+							std::cout << "true ret to " << (p ? p->get_id() : "END") << "[" << i << "]" << endl;
 							//cin.get();
 						}
 						TRACE.pop();
@@ -4195,7 +4282,7 @@ bool interpreter::process(bool neg, clause * this_clause, predicate_item * p, fr
 					else if (!variants->has_variant(i+1)) {
 						/**/
 						if (built_flag){
-							cout << "false ret to " << (p ? p->get_id() : "END") << "[" << i << "]" << endl;
+							std::cout << "false ret to " << (p ? p->get_id() : "END") << "[" << i << "]" << endl;
 							//cin.get();
 						}
 						ptrTRACE.pop();
@@ -4275,7 +4362,7 @@ bool interpreter::process(bool neg, clause * this_clause, predicate_item * p, fr
 						yes = process(neg, this_clause, next, ff, next_args);
 						/**/
 						if (built_flag){
-							cout << (yes ? "true" : "false") << " ret to " << (p ? p->get_id() : "END") << "[" << i << "]" << endl;
+							std::cout << (yes ? "true" : "false") << " ret to " << (p ? p->get_id() : "END") << "[" << i << "]" << endl;
 							//cin.get();
 						}
 
@@ -4372,7 +4459,7 @@ bool interpreter::process(bool neg, clause * this_clause, predicate_item * p, fr
 							yes = process(next_neg, next_clause, next_clause_call, _up_ff, next_args);
 							/**/
 							if (built_flag){
-								cout << (yes ? "true" : "false") << " ret to " << (p ? p->get_id() : "END") << "[" << i << "]" << endl;
+								std::cout << (yes ? "true" : "false") << " ret to " << (p ? p->get_id() : "END") << "[" << i << "]" << endl;
 								//cin.get();
 							}
 							if (!yes) {
@@ -4454,7 +4541,7 @@ void interpreter::parse_clause(vector<string> & renew, frame_item * ff, string &
 		id += s[p++];
 
 	if (id.length() == 0) {
-		cout << s.substr(p,10) << " : strange clause head!" << endl;
+		std::cout << s.substr(p,10) << " : strange clause head!" << endl;
 		exit(2);
 	}
 
@@ -4484,16 +4571,16 @@ void interpreter::parse_clause(vector<string> & renew, frame_item * ff, string &
 				cl->add_arg(s.substr(oldp, p - oldp));
 			}
 			else {
-				cout << id << " : strange clause head!" << endl;
+				std::cout << id << " : strange clause head!" << endl;
 				exit(2);
 			}
 			if (!bypass_spaces(s, p)) {
-				cout << id << " : strange clause head!" << endl;
+				std::cout << id << " : strange clause head!" << endl;
 				exit(2);
 			}
 			if (s[p] == ',') p++;
 			else if (s[p] != ')') {
-				cout << id << " : unexpected '" << s[p] << "' in clause head!" << endl;
+				std::cout << id << " : unexpected '" << s[p] << "' in clause head!" << endl;
 				exit(2);
 			}
 		}
@@ -4684,7 +4771,7 @@ void interpreter::parse_clause(vector<string> & renew, frame_item * ff, string &
 				}
 
 				if (iid.length() == 0) {
-					cout << id << " : " << s.substr(p,10) << " : strange item call!" << endl;
+					std::cout << id << " : " << s.substr(p,10) << " : strange item call!" << endl;
 					exit(2);
 				}
 
@@ -4873,16 +4960,16 @@ void interpreter::parse_clause(vector<string> & renew, frame_item * ff, string &
 							pi->add_arg(s.substr(oldp, p - oldp));
 						}
 						else {
-							cout << id << ":" << iid << " : strange call head!" << endl;
+							std::cout << id << ":" << iid << " : strange call head!" << endl;
 							exit(2);
 						}
 						if (!bypass_spaces(s, p)) {
-							cout << id << ":" << iid << " : strange call head!" << endl;
+							std::cout << id << ":" << iid << " : strange call head!" << endl;
 							exit(2);
 						}
 						if (s[p] == ',') p++;
 						else if (s[p] != ')') {
-							cout << id << ":" << iid << " : unexpected '" << s[p] << "' in call head!" << endl;
+							std::cout << id << ":" << iid << " : unexpected '" << s[p] << "' in call head!" << endl;
 							exit(2);
 						}
 					}
@@ -4898,7 +4985,7 @@ void interpreter::parse_clause(vector<string> & renew, frame_item * ff, string &
 						n++;
 					}
 					if (brackets.empty()) {
-						cout << "Can't understand logical structure in " << id << " clause [" << s.substr(p - 10, 100) << "] : probably 'once' tangled?" << endl;
+						std::cout << "Can't understand logical structure in " << id << " clause [" << s.substr(p - 10, 100) << "] : probably 'once' tangled?" << endl;
 						exit(2);
 					}
 					brackets.top()->push_branch(pi);
@@ -4944,7 +5031,7 @@ void interpreter::parse_clause(vector<string> & renew, frame_item * ff, string &
 						prev_pi = frontier;
 					}
 					else {
-						cout << "Can't understand -> in " << id << " clause [" << s.substr(p-10, 100) << "]!" << endl;
+						std::cout << "Can't understand -> in " << id << " clause [" << s.substr(p-10, 100) << "]!" << endl;
 						exit(2);
 					}
 				}
@@ -4954,7 +5041,7 @@ void interpreter::parse_clause(vector<string> & renew, frame_item * ff, string &
 					p++;
 
 					if (!brackets.top()) {
-						cout << "Brackets not balanced or problems with ';'-branches in " << id << " clause!" << endl;
+						std::cout << "Brackets not balanced or problems with ';'-branches in " << id << " clause!" << endl;
 						exit(2);
 					}
 					else {
@@ -4982,14 +5069,14 @@ void interpreter::parse_clause(vector<string> & renew, frame_item * ff, string &
 					}
 
 					if (or_branch || brackets.size()) {
-						cout << "Brackets not balanced or problems with ';'-branches in " << id << " clause!" << endl;
+						std::cout << "Brackets not balanced or problems with ';'-branches in " << id << " clause!" << endl;
 						exit(2);
 					}
 					break;
 				}
 			}
 			else {
-				cout << "'(' or ')' or '.' or ',' or ';' expected in " << id << " clause!" << endl;
+				std::cout << "'(' or ')' or '.' or ',' or ';' expected in " << id << " clause!" << endl;
 				exit(2);
 			}
 		} while (true);
@@ -5084,7 +5171,21 @@ interpreter::interpreter(const string & fname, const string & starter_name) {
 	current_input = STD_INPUT;
 	current_output = STD_OUTPUT;
 	ins = &cin;
-	outs = &cout;
+	outs = &std::cout;
+
+	CALLS.reserve(50000);
+	FRAMES.reserve(50000);
+	NEGS.reserve(50000);
+	_FLAGS.reserve(50000);
+	PARENT_CALLS.reserve(50000);
+	PARENT_CALL_VARIANT.reserve(50000);
+	CLAUSES.reserve(50000);
+	// FLAGS;
+	LEVELS.reserve(50000);
+	TRACE.reserve(50000);
+	TRACERS.reserve(50000);
+	ptrTRACE.reserve(50000);
+
 	if (fname.length() > 0)
 		starter = load_program(fname, starter_name);
 	else
@@ -5141,14 +5242,14 @@ string interpreter::open_file(const string & fname, const string & mode) {
 	else if (mode == "append")
 		files[file_num].open(fname, ios_base::app);
 	else {
-		cout << "Unknown file [" << fname << "] open mode = [" << mode << "]" << endl;
+		std::cout << "Unknown file [" << fname << "] open mode = [" << mode << "]" << endl;
 		exit(504);
 	}
 
 	if (files[file_num])
 		file_num++;
 	else {
-		cout << "File [" << fname << "] can't be opened with mode = [" << mode << "]" << endl;
+		std::cout << "File [" << fname << "] can't be opened with mode = [" << mode << "]" << endl;
 		exit(505);
 	}
 
@@ -5163,18 +5264,18 @@ void interpreter::close_file(const string & obj) {
 
 basic_fstream<char> & interpreter::get_file(const string & obj, int & fn) {
 	if (obj.length() < 2 || obj[0] != '#') {
-		cout << "No such file: id = [" << obj << "]" << endl;
+		std::cout << "No such file: id = [" << obj << "]" << endl;
 		exit(501);
 	}
 	fn = atoi(obj.substr(1).c_str());
 	if (fn < 0 || fn >= file_num) {
-		cout << "Incorrect file number = [" << fn << "]" << endl;
+		std::cout << "Incorrect file number = [" << fn << "]" << endl;
 		exit(502);
 	}
 
 	map<int, basic_fstream<char> >::iterator it = files.find(fn);
 	if (it == files.end()) {
-		cout << "Probably file [" << fn << "] is already closed" << endl;
+		std::cout << "Probably file [" << fn << "] is already closed" << endl;
 		exit(503);
 	}
 
@@ -5239,7 +5340,7 @@ int main(int argc, char ** argv) {
 	struct rlimit rl = { RLIM_INFINITY, RLIM_INFINITY };
 	int result = setrlimit(RLIMIT_STACK, &rl);
 	if (result != 0) {
-		cout << "setrlimit returned result = " << result << endl;
+		std::cout << "setrlimit returned result = " << result << endl;
 		exit(1000);
 	}
 #endif
@@ -5257,13 +5358,13 @@ int main(int argc, char ** argv) {
 
 	if (argc == main_part) {
 		interpreter prolog("", "");
-		cout << "Prolog MicroBrain by V.V.Pekunov V0.21beta" << endl;
-		cout << "  Enter 'halt.' or 'end_of_file' to exit." << endl << endl;
+		std::cout << "Prolog MicroBrain by V.V.Pekunov V0.21beta" << endl;
+		std::cout << "  Enter 'halt.' or 'end_of_file' to exit." << endl << endl;
 		while (true) {
 			string line;
 			int p = 0;
 
-			cout << ">";
+			std::cout << ">";
 			getline(cin, line);
 
 			if (line == "end_of_file")
@@ -5298,19 +5399,19 @@ int main(int argc, char ** argv) {
 			pi->bind();
 			bool ret = pi->processing(false, 0, variants, args, f);
 
-			map<string, value *>::iterator itv = f->get_vars()->begin();
-			while (itv != f->get_vars()->end()) {
-				cout << "  " << itv->first << " = ";
-				itv->second->write(&cout);
-				cout << endl;
+			int itv = 0;
+			while (itv < f->get_size()) {
+				std::cout << "  " << f->atn(itv) << " = ";
+				f->at(itv)->write(&std::cout);
+				std::cout << endl;
 				itv++;
 			}
 
 			delete args;
 			delete variants;
 
-			cout << endl;
-			cout << (ret ? "true" : "false") << endl;
+			std::cout << endl;
+			std::cout << (ret ? "true" : "false") << endl;
 			
 			delete pi;
 			delete f;
@@ -5323,13 +5424,13 @@ int main(int argc, char ** argv) {
 			prolog.run();
 		}
 		else
-			cout << "Goal absent!" << endl;
+			std::cout << "Goal absent!" << endl;
 	}
 	else {
-		cout << "Usage: prolog_micro_brain.exe [FLAGS] [-consult <file.pro> <goal_predicate_name>]" << endl;
-		cout << "   FLAGS:" << endl;
-		cout << "      --prefer-speed    -- Accelerates program but may consume a lot of memory" << endl;
-		cout << "      --prefer-memory   -- Uses a minimal amount of memory but is slower" << endl;
+		std::cout << "Usage: prolog_micro_brain.exe [FLAGS] [-consult <file.pro> <goal_predicate_name>]" << endl;
+		std::cout << "   FLAGS:" << endl;
+		std::cout << "      --prefer-speed    -- Accelerates program but may consume a lot of memory" << endl;
+		std::cout << "      --prefer-memory   -- Uses a minimal amount of memory but is slower" << endl;
 	}
 	return 0;
 }
