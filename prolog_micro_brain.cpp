@@ -794,10 +794,10 @@ public:
 class list : public value {
 	friend class predicate_item_nth;
 
-	std::list<value *> val;
+	stack_container<value *> val;
 	value * tag;
 public:
-	list(const std::list<value *> & v, value * _tag) : value(), val(v), tag(_tag) { }
+	list(const stack_container<value *> & v, value * _tag) : value(), val(v), tag(_tag) { }
 
 	virtual void free() {
 		for (value * v : val)
@@ -841,7 +841,7 @@ public:
 		else if (val.size() == 0)
 			return NULL;
 		else {
-			std::list<value *>::iterator it = val.end();
+			stack_container<value *>::iterator it = val.end();
 
 			(*(--it))->use();
 
@@ -853,11 +853,7 @@ public:
 		if (n < 1) return NULL;
 
 		if (n <= val.size()) {
-			std::list<value *>::iterator it = val.begin();
-			while (n > 1) {
-				n--;
-				it++;
-			}
+			stack_container<value *>::iterator it = val.begin() + (n - 1);
 			(*it)->use();
 			return *it;
 		}
@@ -874,7 +870,7 @@ public:
 	}
 
 	void iterate(std::function<void(value *)> check) {
-		std::list<value *>::iterator it = val.begin();
+		stack_container<value *>::iterator it = val.begin();
 		while (it != val.end()) {
 			check(*it);
 			it++;
@@ -887,20 +883,22 @@ public:
 	}
 
 	void split(frame_item * f, int p, value * & L1, value * & L2) {
-		std::list<value *> S, S1, S2;
+		stack_container<value *> S, S1, S2;
 		get(f, S);
 
-		std::list<value *>::iterator it = S.begin();
+		stack_container<value *>::iterator it = S.begin();
+		S1.reserve(p);
 		for (int i = 0; i < p; i++)
 			S1.push_back((*it++)->copy(f));
+		S2.reserve(S.size() - p);
 		for (int i = p; i < S.size(); i++)
 			S2.push_back((*it++)->copy(f));
 		L1 = new list(S1, NULL);
 		L2 = new list(S2, NULL);
 	}
 
-	list * from(frame_item * f, std::list<value *>::iterator starting) {
-		list * result = new list(std::list<value *>(), NULL);
+	list * from(frame_item * f, stack_container<value *>::iterator starting) {
+		list * result = new list(stack_container<value *>(), NULL);
 		while (starting != val.end())
 		{
 			result->add((*starting)->copy(f));
@@ -911,7 +909,7 @@ public:
 	}
 
 	virtual value * fill(frame_item * vars) {
-		std::list<value *>::iterator it = val.begin();
+		stack_container<value *>::iterator it = val.begin();
 		for (; it != val.end(); it++) {
 			value * old = *it;
 			*it = (*it)->fill(vars);
@@ -939,7 +937,8 @@ public:
 	}
 
 	virtual value * copy(frame_item * f) {
-		std::list<value *> new_val;
+		stack_container<value *> new_val;
+		new_val.reserve(val.size());
 		for (value * v : val)
 			new_val.push_back(v->copy(f));
 		return new list(new_val, tag ? tag->copy(f) : NULL);
@@ -966,13 +965,13 @@ public:
 		if (new_tag) new_tag->use();
 	}
 
-	virtual bool get(frame_item * f, std::list<value *> & dest) {
+	virtual bool get(frame_item * f, stack_container<value *> & dest) {
 		dest.clear();
 		for (value * v : val)
 			dest.push_back(v->copy(f));
 		if (tag) {
 			if (dynamic_cast<list *>(tag)) {
-				std::list<value *> ltag;
+				stack_container<value *> ltag;
 				if (((list *)tag)->get(f, ltag)) {
 					for (value * v : ltag)
 						dest.push_back(v->copy(f));
@@ -995,9 +994,9 @@ public:
 		}
 		if (dynamic_cast<list *>(from)) {
 			value * _from = (list *)from;
-			std::list<value *>::iterator _from_it = ((list *)_from)->val.begin();
+			stack_container<value *>::iterator _from_it = ((list *)_from)->val.begin();
 			value * _to = this;
-			std::list<value *>::iterator _to_it = ((list *)_to)->val.begin();
+			stack_container<value *>::iterator _to_it = ((list *)_to)->val.begin();
 
 			while (_from && _to) {
 				while (dynamic_cast<list *>(_from) && _from_it == ((list *)_from)->val.end()) {
@@ -1016,14 +1015,14 @@ public:
 					else if (_to)
 						return _from->unify(ff, _to);
 					else
-						return _from->unify(ff, new ::list(std::list<value *>(), NULL));
+						return _from->unify(ff, new ::list(stack_container<value *>(), NULL));
 				if (dynamic_cast<var *>(_to))
 					if (dynamic_cast<list *>(_from))
 						return _to->unify(ff, ((list *)_from)->from(ff, _from_it));
 					else if (_from)
 						return _to->unify(ff, _from);
 					else
-						return _to->unify(ff, new ::list(std::list<value *>(), NULL));
+						return _to->unify(ff, new ::list(stack_container<value *>(), NULL));
 				if (dynamic_cast<list *>(_from) && dynamic_cast<list *>(_to))
 					if (!(*_to_it++)->unify(ff, *_from_it++))
 						return false;
@@ -1785,7 +1784,8 @@ public:
 
 			frame_item * r = f->copy();
 
-			std::list<value *> LL;
+			stack_container<value *> LL;
+			LL.reserve(t1->get_args().size() + 1);
 			LL.push_back(new term(t1->get_name()));
 
 			for (int i = 0; i < t1->get_args().size(); i++)
@@ -2092,8 +2092,8 @@ public:
 
 			if (L1 && L2 && L3)
 				for (; !result && internal_variant <= L3->size(); internal_variant++) {
-					value * K1 = new ::list(std::list<value*>(), NULL);
-					value * K2 = new ::list(std::list<value*>(), NULL);
+					value * K1 = new ::list(stack_container<value*>(), NULL);
+					value * K2 = new ::list(stack_container<value*>(), NULL);
 					L3->split(f, internal_variant, K1, K2);
 
 					frame_item * r = f->copy();
@@ -2304,7 +2304,7 @@ public:
 
 			frame_item * r = f->copy();
 
-			::list * L = new ::list(std::list<value *>(), NULL);
+			::list * L = new ::list(stack_container<value *>(), NULL);
 
 			if (L1 && L1->size() == 0) {
 				char buf1[2] = "[";
@@ -3962,7 +3962,7 @@ value * interpreter::parse(bool exit_on_error, bool parse_complex_terms, frame_i
 				result = new indicator(unescape(st), n);
 		}
 		else if (s[p] == '[') {
-			result = new ::list(std::list<value *>(), NULL);
+			result = new ::list(stack_container<value *>(), NULL);
 			p++;
 			bypass_spaces(s, p);
 			int oldp = p;
