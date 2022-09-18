@@ -58,6 +58,8 @@ char * __ltoa(long long n, char s[], long long radix)
 
 #define __itoa __ltoa
 
+const char * std_lib_pro = "prolog_micro_brain.pro";
+
 const char * STD_INPUT = "#STD_INPUT";
 const char * STD_OUTPUT = "#STD_OUTPUT";
 
@@ -5098,6 +5100,16 @@ void interpreter::parse_program(vector<string> & renew, string & s) {
 }
 
 void interpreter::add_std_body(string & body) {
+	ifstream in(std_lib_pro);
+	if (in) {
+		char buf[65536];
+		while (!in.eof()) {
+			in.getline(buf, sizeof(buf));
+			body.append(buf);
+			body.append("\n");
+		}
+		in.close();
+	}
 	body.append("subtract([],_,[]).");
 	body.append("\n");
 	body.append("subtract([H|T],L1,L2):-once(member(H,L1)), once(subtract(T,L1,L2)).");
