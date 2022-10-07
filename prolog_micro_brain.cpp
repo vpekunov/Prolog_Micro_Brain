@@ -749,7 +749,7 @@ public:
 	frame_item * copy() {
 		frame_item * result = new frame_item();
 		result->names = names;
-		long long d = &result->names[0] - &names[0];
+		long long d = result->names.size() == 0 ? 0 : &result->names[0] - &names[0];
 		result->vars = vars;
 		for (mapper & m : result->vars) {
 			m.ptr = m.ptr->copy(this);
@@ -836,7 +836,7 @@ public:
 			vars[it].ptr = v->copy(this);
 		}
 		else {
-			char * oldp = &names[0];
+			char * oldp = names.size() == 0 ? NULL : &names[0];
 			int oldn = names.size();
 			int n = strlen(name);
 			names.resize(oldn + n + 1);
@@ -3566,7 +3566,7 @@ public:
 			int L = prolog->out_buf.length(); // Длина входного сообщения
 			int NB = L/16 + (L % 16 == 0 ? 0 : 1); // Число 16-байтных блоков входного сообщения
 
-			unsigned int * _IN = new unsigned int[NB*16];
+			unsigned int * _IN = new unsigned int[NB*4];
 
 			memset(_IN, 0, NB*16);
 			// Копируем входную строку в _IN
