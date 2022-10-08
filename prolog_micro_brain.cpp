@@ -6,6 +6,7 @@
 
 #include <iostream>
 #include <fstream>
+#include <sstream>
 #include <map>
 #include <set>
 #include <list>
@@ -3600,8 +3601,104 @@ public:
 			} else
 				cout << "Can't write to file!" << endl;
 			delete[] _IN;
+			delete[] KEY;
 			prolog->out_buf.clear();
 		}
+
+		generated_vars * result = new generated_vars();
+
+		result->push_back(f->copy());
+
+		return result;
+	}
+};
+
+class predicate_item_mars_decode : public predicate_item {
+public:
+	predicate_item_mars_decode(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) { }
+
+	virtual const string get_id() { return "mars_decode"; }
+
+	virtual generated_vars * generate_variants(frame_item * f, vector<value *> * & positional_vals) {
+		if (positional_vals->size() != 1) {
+			std::cout << "mars_decode(FName) incorrect call!" << endl;
+			exit(-3);
+		}
+		bool d1 = positional_vals->at(0)->defined();
+		if (!d1) {
+			std::cout << "mars_decode(FName) indeterminated!" << endl;
+			exit(-3);
+		}
+		::term * t = dynamic_cast<::term *>(positional_vals->at(0));
+		if (!t) {
+			std::cout << "mars_decode(FName) : FName is not a term!" << endl;
+			exit(-3);
+		}
+		string arg = t->to_str();
+
+		string password; // Пароль
+
+		int L;
+
+		ifstream inf(arg, ios_base::binary);
+		if (inf) {
+			inf.seekg(0, std::ios::end);
+			L = inf.tellg();
+			inf.seekg(0, std::ios::beg);
+
+			cout << "MARS: Input password: ";
+			getline(cin, password);
+			fflush(stdin);
+		}
+		else {
+			cout << "Can't read from file!" << endl;
+			L = 0;
+		}
+
+		int NB = L / 16 + (L % 16 == 0 ? 0 : 1); // Число 16-байтных блоков входного сообщения
+
+		unsigned int * _IN = new unsigned int[NB * 4];
+
+		memset(_IN, 0, NB * 16);
+		// Копируем входную строку в IN
+		if (inf) {
+			inf.read((char *)_IN, L);
+			inf.close();
+		}
+
+		int LP = password.length(); // Длина пароля
+		int NPW = max(min_n, LP / 4 + (LP % 4 == 0 ? 0 : 1)); // Число 4-байтных слов пароля
+
+		int n; // Число 4-байтных блоков ключа
+		if (NPW > max_n)
+			n = max_n;
+		else
+			n = NPW;
+
+		unsigned int * KEY = new unsigned int[n];
+
+		memset(KEY, 0, n * 4);
+		// Копируем пароль в KEY
+		memmove(KEY, password.c_str(), min(LP, n * 4));
+
+		unsigned int ExKey[40]; // Расширенный ключ
+		expand_key(n, KEY, ExKey);
+
+		// Декодирование
+		for (int i = 0; i < NB; i++) {
+			decode_direct(&_IN[i * 4], ExKey);
+			decode_core(&_IN[i * 4], ExKey);
+			decode_reverse(&_IN[i * 4], ExKey);
+		}
+
+		// Создаем выходную строку из декодированных блоков
+		std::stringstream sst;
+		string buf;
+		sst.write((char *)_IN, L);
+		while (getline(sst, buf))
+			(*prolog->outs) << buf << endl;
+		delete[] _IN;
+		delete[] KEY;
 
 		generated_vars * result = new generated_vars();
 
@@ -5345,6 +5442,9 @@ void interpreter::parse_clause(vector<string> & renew, frame_item * ff, string &
 				}
 				else if (iid == "mars") {
 					pi = new predicate_item_mars(neg, once, call, num, cl, this);
+				}
+				else if (iid == "mars_decode") {
+					pi = new predicate_item_mars_decode(neg, once, call, num, cl, this);
 				}
 				else if (iid == "write") {
 					pi = new predicate_item_write(neg, once, call, num, cl, this);
