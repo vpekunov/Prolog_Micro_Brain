@@ -3,8 +3,9 @@
 ***Может компилироваться как MS Visual C++ так и GNU C++***
 
 В ***MS Visual C++*** компилируется проект prolog_micro_brain.sln
+С помощью ***Free Pascal*** компилируется проект xpathInduct.dir/xpathInduct.lpr
 
-В ***GNU C++*** для компиляции можно дать команду: g++ -o prolog_micro_brain prolog_micro_brain.cpp -O4 -std=c++0x -msse4
+В ***Linux*** для компиляции можно дать команду: sh ./install.sh
 
 Папка ***tests*** содержит простые примеры. Примеры можно запустить двумя способами:
 1. ***Из командной строки***. Например, если необходимо запустить пример ***prog.pro***
@@ -74,3 +75,16 @@
 - retractall
 - inc
 - halt
+- var
+- load_classes
+- init_xpathing
+- induct_xpathing
+- unload_classes
+- add_object
+- add_link
+- del_object
+- del_link
+- del_all_objects
+- prepare_model_for_induct
+- atom_hex
+- atom_hexs

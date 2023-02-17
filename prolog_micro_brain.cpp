@@ -1,6 +1,6 @@
 // (C) V.V.Pekunov, Just For Fun :)
 
-// g++ -o prolog_micro_brain prolog_micro_brain.cpp -O4 -std=c++0x -msse4
+// g++ -o prolog_micro_brain tinyxml2.cpp elements.cpp prolog_micro_brain.cpp -std=c++11 -O4 -lm -lboost_system -lboost_filesystem -ldl
 
 #define _CRT_SECURE_NO_WARNINGS
 
@@ -11,6 +11,7 @@
 #include <set>
 #include <list>
 #include <vector>
+#include <locale>
 #include <string>
 #include <stack>
 #include <queue>
@@ -20,9 +21,26 @@
 #include <math.h>
 #include <string.h>
 
+#include "elements.h"
+
 #ifdef __linux__
 #include <sys/resource.h>
 #include <unistd.h>
+#include <dlfcn.h>
+
+typedef void * HMODULE;
+
+HMODULE LoadLibrary(wchar_t * _fname) {
+	return dlopen(wstring_to_utf8(_fname).c_str(), RTLD_LAZY);
+}
+
+void * GetProcAddress(HMODULE handle, char * fname) {
+	return dlsym(handle, fname);
+}
+
+void FreeLibrary(HMODULE handle) {
+	dlclose(handle);
+}
 #else
 #include <Windows.h>
 #endif
@@ -60,6 +78,9 @@ char * __ltoa(long long n, char s[], long long radix)
 #define __itoa __ltoa
 
 const char * std_lib_pro = "prolog_micro_brain.pro";
+
+const char * nameObjFactID = "$ObjFactID";
+const char * nameObjLinkID = "$ObjLinkID";
 
 const char * STD_INPUT = "#STD_INPUT";
 const char * STD_OUTPUT = "#STD_OUTPUT";
@@ -609,7 +630,14 @@ string_atomizer atomizer;
 class interpreter {
 private:
 	predicate_item_user * starter;
+	HMODULE xpathInductLib;
+	char env[65536 * 4];
+	bool xpath_compiled;
+	bool xpath_loaded;
 public:
+	string CLASSES_ROOT;
+	string INDUCT_MODE;
+
 	map<string, predicate *> PREDICATES;
 	map< string, vector<term *> *> DB;
 	map< string, set<int> *> DBIndicators;
@@ -641,6 +669,54 @@ public:
 	interpreter(const string & fname, const string & starter_name);
 	~interpreter();
 
+	bool XPathCompiled() {
+		return xpath_compiled;
+	}
+	bool XPathLoaded() {
+		return xpath_loaded;
+	}
+	void SetXPathCompiled(bool v) {
+		xpath_compiled = v;
+	}
+	void SetXPathLoaded(bool v) {
+		xpath_loaded = v;
+	}
+
+	bool LoadXPathing() {
+		bool result = false;
+		if (!xpathInductLib) {
+			xpathInductLib = LoadLibrary(
+#ifdef __linux__
+				L"./libxpathInduct.so"
+#else
+				L"xpathInduct.dll"
+#endif
+			);
+			if (xpathInductLib) {
+				XPathInduct = (XPathInductF) GetProcAddress(xpathInductLib, "XPathInduct");
+				CompileXPathing = (CompileXPathingF) GetProcAddress(xpathInductLib, "CompileXPathing");
+				SetInterval = (SetIntervalF) GetProcAddress(xpathInductLib, "SetInterval");
+				ClearRestrictions = (ClearRestrictionsF) GetProcAddress(xpathInductLib, "ClearRestrictions");
+				ClearRuler = (ClearRulerF) GetProcAddress(xpathInductLib, "ClearRuler");
+				SetDeduceLogFile = (SetDeduceLogFileF) GetProcAddress(xpathInductLib, "SetDeduceLogFile");
+				CreateDOMContact = (CreateDOMContactF) GetProcAddress(xpathInductLib, "CreateDOMContact");
+				GetMSG = (GetMSGF) GetProcAddress(xpathInductLib, "GetMSG");
+				result = true;
+			}
+		}
+		return result;
+	}
+
+	void UnloadXPathing() {
+		if (xpathInductLib)
+			FreeLibrary(xpathInductLib);
+		xpathInductLib = 0;
+	}
+
+	char * ENV() {
+		return env;
+	}
+
 	string open_file(const string & fname, const string & mode);
 	void close_file(const string & obj);
 	basic_fstream<char> & get_file(const string & obj, int & fn);
@@ -663,7 +739,6 @@ public:
 	void bind();
 	predicate_item_user * load_program(const string & fname, const string & starter_name);
 
-	bool bypass_spaces(const string & s, int & p);
 	value * parse(bool exit_on_error, bool parse_complex_terms, frame_item * ff, const string & s, int & p);
 	void parse_program(vector<string> & renew, string & s);
 	void parse_clause(vector<string> & renew, frame_item * ff, string & s, int & p);
@@ -1084,6 +1159,50 @@ public:
 				return false;
 		return true;
 	};
+
+	virtual string to_hex(char SEP) {
+		string NAME = atomizer.get_string(name);
+		string result;
+		for (unsigned char C : NAME) {
+			if (C == (unsigned char)SEP)
+				result += SEP;
+			else {
+				int h = C >> 4;
+				int l = C & 0x0F;
+				if (h > 9) result += (char)('A' + h - 10);
+				else result += (char)('0' + h);
+				if (l > 9) result += (char)('A' + l - 10);
+				else result += (char)('0' + l);
+			}
+		}
+		return result;
+	}
+
+	virtual string from_hex(char SEP) {
+		string NAME = atomizer.get_string(name);
+		string result;
+
+		auto HexDigit = [](char H)->int {
+			if (H >= '0' && H <= '9')
+				return H - '0';
+			else if (H >= 'A' && H <= 'F')
+				return H - 'A' + 10;
+			else if (H >= 'a' && H <= 'f')
+				return H - 'a' + 10;
+			else
+				return 0;
+		};
+
+		for (int i = 0; i < NAME.length(); i++) {
+			if (NAME[i] == SEP)
+				result += SEP;
+			else {
+				result += (char)(HexDigit(NAME[i]) * 16 + HexDigit(NAME[i + 1]));
+				i++;
+			}
+		}
+		return result;
+	}
 
 	virtual string to_str(bool simple = false) {
 		string result = atomizer.get_string(name);
@@ -2118,12 +2237,6 @@ public:
 		}
 
 		bool d1 = positional_vals->at(0)->defined();
-		bool d2 = positional_vals->at(1)->defined();
-
-		if (!d1 && !d2) {
-			std::cout << "=..(term,[term_id,arg1,...,argN]) indeterminated!" << endl;
-			exit(-3);
-		}
 
 		generated_vars * result = new generated_vars();
 
@@ -2157,7 +2270,7 @@ public:
 			}
 			L2->free();
 		}
-		else if (d2) {
+		else {
 			value * t1 = dynamic_cast<value *>(positional_vals->at(0));
 			::list * L2 = dynamic_cast<::list *>(positional_vals->at(1));
 
@@ -2183,6 +2296,304 @@ public:
 			TT->free();
 		}
 
+		return result;
+	}
+};
+
+class predicate_item_load_classes : public predicate_item {
+public:
+	predicate_item_load_classes(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) { }
+
+	virtual const string get_id() { return "load_classes"; }
+
+	virtual generated_vars * generate_variants(frame_item * f, vector<value *> * & positional_vals) {
+		if (positional_vals->size() != 3) {
+			std::cout << "load_classes(RootDir,ObjFactID,ObjLinkID) incorrect call!" << endl;
+			exit(-3);
+		}
+
+		bool d1 = positional_vals->at(0)->defined();
+		bool d2 = positional_vals->at(1)->defined();
+		bool d3 = positional_vals->at(2)->defined();
+		if (!d1 || !d2 || !d3) {
+			std::cout << "load_classes(RootDir,ObjFactID,ObjLinkID) unbounded!" << endl;
+			exit(-3);
+		}
+
+		term * t1 = dynamic_cast<term *>(positional_vals->at(0));
+		term * t2 = dynamic_cast<term *>(positional_vals->at(1));
+		term * t3 = dynamic_cast<term *>(positional_vals->at(2));
+
+		generated_vars * result = new generated_vars();
+		if (t1 && t2 && t3 && LoadModellingDesktop(L"", utf8_to_wstring(t1->get_name())) &&
+				prolog->LoadXPathing()) {
+			frame_item * r = f->copy();
+			prolog->CLASSES_ROOT = t1->get_name();
+			prolog->SetXPathLoaded(true);
+			prolog->GVars[string(nameObjFactID)] = t2->copy(r);
+			prolog->GVars[string(nameObjLinkID)] = t3->copy(r);
+			result->push_back(r);
+		}
+		else {
+			delete result;
+			prolog->SetXPathLoaded(false);
+			result = NULL;
+		}
+		return result;
+	}
+};
+
+class predicate_item_init_xpathing : public predicate_item {
+public:
+	predicate_item_init_xpathing(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) { }
+
+	virtual const string get_id() { return "init_xpathing"; }
+
+	virtual generated_vars * generate_variants(frame_item * f, vector<value *> * & positional_vals) {
+		if (positional_vals->size() != 1) {
+			std::cout << "init_xpathing(Version) incorrect call!" << endl;
+			exit(-3);
+		}
+
+		bool d1 = positional_vals->at(0)->defined();
+		if (!d1) {
+			std::cout << "init_xpathing(Version) unbounded!" << endl;
+			exit(-3);
+		}
+
+		term * t1 = dynamic_cast<term *>(positional_vals->at(0));
+		prolog->INDUCT_MODE = t1 ? t1->get_name() : "";
+
+		string induct_fname = prolog->CLASSES_ROOT;
+		if (induct_fname.length() && induct_fname.back() != '\\' && induct_fname.back() != '/')
+			induct_fname += "/";
+		string log_fname = induct_fname;
+		induct_fname += "induct.im";
+		log_fname += "induct.log";
+
+		generated_vars * result = new generated_vars();
+		if (t1 && prolog->XPathLoaded() && CompileXPathing(
+				false,
+				t1->get_name().c_str(),
+				induct_fname.c_str(),
+				NULL, NULL, prolog->ENV(),
+				NULL
+				)) {
+			frame_item * r = f->copy();
+			SetDeduceLogFile(log_fname.c_str());
+			prolog->SetXPathCompiled(true);
+			result->push_back(r);
+		}
+		else {
+			delete result;
+			ClearRestrictions();
+			prolog->SetXPathCompiled(false);
+			result = NULL;
+		}
+		return result;
+	}
+};
+
+class predicate_item_induct_xpathing : public predicate_item {
+public:
+	predicate_item_induct_xpathing(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) { }
+
+	virtual const string get_id() { return "induct_xpathing"; }
+
+	virtual generated_vars * generate_variants(frame_item * f, vector<value *> * & positional_vals) {
+		if (positional_vals->size() != 7) {
+			std::cout << "induct_xpathing(Interval,nCPU,InFName,OutFName,UseNNet,SimilarDirect,OnlyInduceModel) incorrect call!" << endl;
+			exit(-3);
+		}
+
+		bool d1 = positional_vals->at(0)->defined();
+		bool d2 = positional_vals->at(1)->defined();
+		bool d3 = positional_vals->at(2)->defined();
+		bool d4 = positional_vals->at(3)->defined();
+		bool d5 = positional_vals->at(4)->defined();
+		bool d6 = positional_vals->at(5)->defined();
+		bool d7 = positional_vals->at(6)->defined();
+		if (!d1 || !d2 || !d3 || !d4 || !d5 || !d6 && !d7) {
+			std::cout << "induct_xpathing(Interval,nCPU,InFName,OutFName,UseNNet,SimilarDirect,OnlyInduceModel) unbounded!" << endl;
+			exit(-3);
+		}
+
+		int_number * n1 = dynamic_cast<int_number *>(positional_vals->at(0));
+		int_number * n2 = dynamic_cast<int_number *>(positional_vals->at(1));
+		term * t3 = dynamic_cast<term *>(positional_vals->at(2));
+		term * t4 = dynamic_cast<term *>(positional_vals->at(3));
+		term * t5 = dynamic_cast<term *>(positional_vals->at(4));
+		term * t6 = dynamic_cast<term *>(positional_vals->at(5));
+		term * t7 = dynamic_cast<term *>(positional_vals->at(6));
+
+		if (n1) SetInterval(1000*(uint32_t)n1->get_value());
+
+		string IDS = "";
+		int n_objs = 0;
+		map<string, value *>::iterator itf = prolog->GVars.find("$ObjFactID");
+		if (itf != prolog->GVars.end()) {
+			map< string, vector<term *> *>::iterator itd = prolog->DB.find(itf->second->to_str());
+			if (itd != prolog->DB.end())
+				n_objs = itd->second->size();
+		}
+		for (int i = 1; i <= n_objs; i++) {
+			char Buf[128];
+			IDS += string(__ltoa(i, Buf, 10));
+			if (i != n_objs)
+				IDS += "\r\n";
+		}
+
+		bool UseNNet = t5 && t5->get_name() != "f";
+		bool MainLineAllowed = t6 && t6->get_name() != "f";
+		bool OnlyInduceModel = t7 && t7->get_name() != "f";
+
+		generated_vars * result = new generated_vars();
+		if (n1 && n2 && t3 && t4 && t5 && t6 && t7 && prolog->XPathCompiled() && XPathInduct(
+			false,
+			CreateSysF,
+			ExistClassF,
+			GetElementF,
+			CanReachF,
+			CreateContactsF,
+			AddElementF,
+			AddLinkF,
+			AnalyzeLinkStatusIsInformF,
+			SetParameterIfExistsF,
+			MoveF,
+			CheckSysF,
+			ToStringF,
+			GenerateCodeF,
+			SaveToXMLF,
+			_FreeF,
+			NodeNameTester,
+			prolog->INDUCT_MODE.c_str(),
+			UseNNet,
+			MainLineAllowed,
+			NULL, prolog->ENV(), prolog->ENV(),
+			t3->get_name().c_str(), t4->get_name().c_str(),
+			(int)(0.5 + n2->get_value()),
+			IDS.c_str(),
+			OnlyInduceModel
+			)) {
+			frame_item * r = f->copy();
+			result->push_back(r);
+		}
+		else {
+			delete result;
+			ClearRestrictions();
+			result = NULL;
+		}
+		return result;
+	}
+};
+
+class predicate_item_unload_classes : public predicate_item {
+public:
+	predicate_item_unload_classes(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) { }
+
+	virtual const string get_id() { return "unload_classes"; }
+
+	virtual generated_vars * generate_variants(frame_item * f, vector<value *> * & positional_vals) {
+		if (positional_vals->size() != 0) {
+			std::cout << "unload_classes incorrect call!" << endl;
+			exit(-3);
+		}
+
+		generated_vars * result = new generated_vars();
+		try {
+			ClearAllRegistered();
+			prolog->UnloadXPathing();
+			prolog->CLASSES_ROOT = "";
+			prolog->INDUCT_MODE = "";
+			prolog->SetXPathCompiled(false);
+			prolog->SetXPathLoaded(false);
+			frame_item * r = f->copy();
+			result->push_back(r);
+		}
+		catch (exception E) {
+			delete result;
+			result = NULL;
+		}
+		return result;
+	}
+};
+
+class predicate_item_var : public predicate_item {
+public:
+	predicate_item_var(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) { }
+
+	virtual const string get_id() { return "var"; }
+
+	virtual generated_vars * generate_variants(frame_item * f, vector<value *> * & positional_vals) {
+		if (positional_vals->size() != 1) {
+			std::cout << "var(V) incorrect call!" << endl;
+			exit(-3);
+		}
+
+		bool d1 = positional_vals->at(0)->defined();
+		generated_vars * result = new generated_vars();
+		if (!d1) {
+			frame_item * r = f->copy();
+			result->push_back(r);
+		}
+		else {
+			delete result;
+			result = NULL;
+		}
+		return result;
+	}
+};
+
+class predicate_item_get_contacts : public predicate_item {
+private:
+	TIODirection Dir;
+public:
+	predicate_item_get_contacts(TIODirection dir, bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog)
+	{
+		Dir = dir;
+	}
+
+	virtual const string get_id() { return "get_(i/o)contacts"; }
+
+	virtual generated_vars * generate_variants(frame_item * f, vector<value *> * & positional_vals) {
+		if (positional_vals->size() != 2) {
+			std::cout << "get_icontacts(ID,ContList) incorrect call!" << endl;
+			exit(-3);
+		}
+
+		bool d1 = positional_vals->at(0)->defined();
+		bool d2 = positional_vals->at(1)->defined();
+		term * t1 = dynamic_cast<term *>(positional_vals->at(0));
+		value * v2 = dynamic_cast<value *>(positional_vals->at(1));
+		generated_vars * result = new generated_vars();
+		if (d1 && !d2 && t1) {
+			frame_item * r = f->copy();
+			vector<TContactReg *> Contacts;
+			GetContactsRegByClassID(
+				utf8_to_wstring(t1->get_name()),
+				Dir,
+				Contacts);
+			::list * received = new ::list(stack_container<value *>(), NULL);
+			for (TContactReg * C : Contacts) {
+				term * t = new ::term("contact");
+				char Buf[128];
+				t->add_arg(r, new term(wstring_to_utf8(C->CntID)));
+				t->add_arg(r, new term(__itoa(rand(), Buf, 10)));
+				received->add(t);
+			}
+			if (v2->unify(r, received))
+				result->push_back(r);
+			else {
+				delete result;
+				result = NULL;
+				delete r;
+			}
+			received->free();
+		}
+		else {
+			delete result;
+			result = NULL;
+		}
 		return result;
 	}
 };
@@ -2690,6 +3101,84 @@ public:
 			frame_item * r = f->copy();
 
 			string S = L2->make_str();
+			term * tt = new ::term(S);
+
+			if (A1->unify(r, tt))
+				result->push_back(r);
+			else {
+				delete result;
+				result = NULL;
+				delete r;
+			}
+			tt->free();
+		}
+
+		return result;
+	}
+};
+
+class predicate_item_atom_hex : public predicate_item {
+private:
+	char SEP;
+public:
+	predicate_item_atom_hex(char sep, bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) {
+		SEP = sep;
+	}
+
+	virtual const string get_id() { return "atom_hex[s]"; }
+
+	virtual generated_vars * generate_variants(frame_item * f, vector<value *> * & positional_vals) {
+		if (positional_vals->size() != 2) {
+			std::cout << "atom_hex[s](A,B) incorrect call!" << endl;
+			exit(-3);
+		}
+		bool d1 = positional_vals->at(0)->defined();
+		bool d2 = positional_vals->at(1)->defined();
+		if (!d1 && !d2) {
+			std::cout << "atom_hex[s](A,B) indeterminated!" << endl;
+			exit(-3);
+		}
+
+		generated_vars * result = new generated_vars();
+		if (d1 && d2) {
+			::term * A1 = dynamic_cast<::term *>(positional_vals->at(0));
+			::term * A2 = dynamic_cast<::term *>(positional_vals->at(1));
+
+			string S2 = A2->from_hex(SEP);
+
+			frame_item * r = f->copy();
+			if (A1->make_str() == S2)
+				result->push_back(r);
+			else {
+				delete result;
+				result = NULL;
+				delete r;
+			}
+		}
+		if (d1 && !d2) {
+			::term * A1 = dynamic_cast<::term *>(positional_vals->at(0));
+			value * L2 = dynamic_cast<::value *>(positional_vals->at(1));
+
+			frame_item * r = f->copy();
+
+			::term * H = new ::term(A1->to_hex(SEP));
+
+			if (L2->unify(r, H))
+				result->push_back(r);
+			else {
+				delete result;
+				result = NULL;
+				delete r;
+			}
+			H->free();
+		}
+		if (!d1 && d2) {
+			value * A1 = dynamic_cast<::value *>(positional_vals->at(0));
+			::term * H2 = dynamic_cast<::term *>(positional_vals->at(1));
+
+			frame_item * r = f->copy();
+
+			string S = H2->from_hex(SEP);
 			term * tt = new ::term(S);
 
 			if (A1->unify(r, tt))
@@ -4034,7 +4523,7 @@ public:
 			beg = ff.tellg();
 			getline(ff, line);
 			p = 0;
-			prolog->bypass_spaces(line, p);
+			bypass_spaces(line, p);
 		} while (!ff.eof() && p == line.length());
 		
 		frame_item * dummy = new frame_item();
@@ -4266,13 +4755,23 @@ public:
 				result->push_back(r);
 			}
 		else {
-			if (prolog->DB.find(id) != prolog->DB.end()) {
-				term * dummy = new term(id);
+			string iid = id;
+			term * dummy = NULL;
+			if (id.length() > 0 && id[0] >= 'A' && id[0] <= 'Z') {
+				dummy = dynamic_cast<term *>(f->get(id.c_str()));
+				if (dummy) {
+					dummy = dynamic_cast<term *>(dummy->copy(f));
+					iid = dummy->get_name();
+				}
+			}
+			else {
+				dummy = new term(id);
 				for (int j = 0; j < positional_vals->size(); j++) {
 					dummy->add_arg(f, positional_vals->at(j));
 				}
-
-				vector<term *> * terms = prolog->DB[id];
+			}
+			if (dummy && prolog->DB.find(iid) != prolog->DB.end()) {
+				vector<term *> * terms = prolog->DB[iid];
 				for (int i = 0; i < terms->size(); i++) {
 					frame_item * ff = f->copy();
 					term * _dummy = (term *)dummy->copy(ff);
@@ -4420,22 +4919,6 @@ void interpreter::block_process(bool clear_flag, bool cut_flag, predicate_item *
 
 		nn--;
 	}
-}
-
-bool interpreter::bypass_spaces(const string & s, int & p) {
-	do {
-		while (p < s.length() && (s[p] == ' ' || s[p] == '\t' || s[p] == '\n' || s[p] == '\r'))
-			p++;
-		if (p < s.length() && s[p] == '%') {
-			string::size_type lpos = s.find('\n', p);
-			if (lpos == string::npos)
-				p = s.length();
-			else
-				p = lpos + 1;
-		} else
-			break;
-	} while (true);
-	return p < s.length();
 }
 
 value * interpreter::parse(bool exit_on_error, bool parse_complex_terms, frame_item * ff, const string & s, int & p) {
@@ -5377,6 +5860,12 @@ void interpreter::parse_clause(vector<string> & renew, frame_item * ff, string &
 				else if (iid == "atom_chars") {
 					pi = new predicate_item_atom_chars(neg, once, call, num, cl, this);
 				}
+				else if (iid == "atom_hex") {
+					pi = new predicate_item_atom_hex(0, neg, once, call, num, cl, this);
+				}
+				else if (iid == "atom_hexs") {
+					pi = new predicate_item_atom_hex(' ', neg, once, call, num, cl, this);
+				}
 				else if (iid == "number_atom") {
 					pi = new predicate_item_number_atom(neg, once, call, num, cl, this);
 				}
@@ -5493,6 +5982,27 @@ void interpreter::parse_clause(vector<string> & renew, frame_item * ff, string &
 				}
 				else if (iid == "halt") {
 					exit(0);
+				}
+				else if (iid == "load_classes") {
+					pi = new predicate_item_load_classes(neg, once, call, num, cl, this);
+				}
+				else if (iid == "init_xpathing") {
+					pi = new predicate_item_init_xpathing(neg, once, call, num, cl, this);
+				}
+				else if (iid == "induct_xpathing") {
+					pi = new predicate_item_induct_xpathing(neg, once, call, num, cl, this);
+				}
+				else if (iid == "unload_classes") {
+					pi = new predicate_item_unload_classes(neg, once, call, num, cl, this);
+				}
+				else if (iid == "var") {
+					pi = new predicate_item_var(neg, once, call, num, cl, this);
+				}
+				else if (iid == "get_icontacts") {
+					pi = new predicate_item_get_contacts(dirInput, neg, once, call, num, cl, this);
+				}
+				else if (iid == "get_ocontacts") {
+					pi = new predicate_item_get_contacts(dirOutput, neg, once, call, num, cl, this);
 				}
 				else {
 					pi = new predicate_item_user(neg, once, call, num, cl, this, iid);
@@ -5730,6 +6240,7 @@ interpreter::interpreter(const string & fname, const string & starter_name) {
 	current_output = STD_OUTPUT;
 	ins = &cin;
 	outs = &std::cout;
+	xpathInductLib = 0;
 
 	CALLS.reserve(50000);
 	FRAMES.reserve(50000);
@@ -5903,6 +6414,8 @@ int main(int argc, char ** argv) {
 	}
 #endif
 
+	setlocale(LC_ALL, "en_US.UTF-8");
+
 	fast_memory_manager = getTotalSystemMemory() > (long long)8 * (long long) 1024 * (long long) 1024 * (long long) 1024;
 
 	int main_part = 1;
@@ -5943,10 +6456,10 @@ int main(int argc, char ** argv) {
 			body.append("internal_goal:-");
 			body.append(line);
 			body.append("\n");
-			prolog.bypass_spaces(body, p);
+			bypass_spaces(body, p);
 			while (p < body.length()) {
 				prolog.parse_clause(renew, f, body, p);
-				prolog.bypass_spaces(body, p);
+				bypass_spaces(body, p);
 			}
 			prolog.bind();
 
