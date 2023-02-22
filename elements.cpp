@@ -1,4 +1,5 @@
 #include "elements.h"
+#include <stdio.h>
 #include <cwctype>
 #include <functional>
 #include <fstream>
@@ -9,6 +10,7 @@
 #include <map>
 #include <vector>
 #include <set>
+#include <cstdarg>
 
 using namespace std;
 
@@ -61,6 +63,66 @@ string wstring_to_utf8(const wstring& str)
 //	std::wstring_convert<std::codecvt_utf8<wchar_t>> myconv;
 //	return myconv.to_bytes(str);
 	return string(str.begin(), str.end());
+}
+
+wstring ReplaceAll(const wstring & src, const wstring & what, const wstring & to) {
+	wstring result = src;
+	wstring::size_type n = 0;
+	while ((n = result.find(what, n)) != wstring::npos)
+	{
+		result.replace(n, what.size(), to);
+		n += to.size();
+	}
+	return result;
+}
+
+wstring GenerateText(const wchar_t * src, int n, ...) {
+	va_list args;
+	va_start(args, n);
+
+	wstring result = src;
+	for (int i = 0; i < n; i++) {
+		wstring arg = wstring(va_arg(args, wchar_t *));
+		char buf[100];
+		sprintf(buf, "$[%i]", i);
+		result = ReplaceAll(result, utf8_to_wstring(buf), arg);
+	}
+
+	va_end(args);
+	return result;
+}
+
+wstring ShiftRight(wstring S, int n) {
+	auto Count = [&](wstring & S, const wstring & FindStr)->int {
+		int Result = 0;
+		wstring::size_type P;
+		do {
+			P = S.find(FindStr);
+			if (P != wstring::npos) {
+				Result++;
+				S.erase(S.begin() + P, S.begin() + P + FindStr.length());
+			}
+		} while (P != wstring::npos);
+		return Result;
+	};
+
+	int PHPBal, PHPBalOld;
+	wstring Result = L"";
+	wstring Sh = wstring(n, ' ');
+	PHPBal = 1;
+	while (S.length()) {
+		wstring::size_type P = S.find(L"\r\n");
+		if (P == wstring::npos) P = 32768*32;
+		wstring Cur = S.substr(0, P + 2);
+		PHPBalOld = PHPBal;
+		PHPBal += Count(Cur, tagPHPOpen) - Count(Cur, tagPHPClose);
+		if (PHPBalOld == 0 && PHPBal >= 0)
+			Result += S.substr(0, P + 2);
+		else
+			Result += Sh + S.substr(0, P + 2);
+		S.erase(S.begin(), S.begin() + P + 2);
+	}
+	return Result;
 }
 
 wstring get_complex(const wstring & s, int & p, wchar_t Before) {
@@ -154,8 +216,9 @@ void GetContactsRegByClassID(const wstring & CID, TIODirection dir, vector<TCont
 TElementReg * RegisterElement(const wstring & PCID,
 	const wstring & CID,
 	const vector<wstring> & Desc,
-	const vector<wstring> & NewPrms) {
-	TElementReg * result = new TElementReg(PCID, CID, Desc, NewPrms);
+	const vector<wstring> & NewPrms,
+	const wstring & Script) {
+	TElementReg * result = new TElementReg(PCID, CID, Desc, NewPrms, Script);
 	ElementRegList.insert(pair<wstring, TElementReg *>(
 		CID,
 		result
@@ -215,8 +278,11 @@ bool LoadModellingDesktop(const wstring & parent, const wstring & root_dir) {
 			// Handle ini-file
 			wpath p(root_dir);
 			wstring fname = root_dir;
+			wstring fsname = root_dir;
 			fname += L"/";
+			fsname += L"/";
 			fname += strClassIni;
+			fsname += strScriptPHP;
 			if (p.filename().string().substr(0, 3) != "cls")
 				p = "";
 			ifstream IN(wstring_to_utf8(fname));
@@ -246,6 +312,22 @@ bool LoadModellingDesktop(const wstring & parent, const wstring & root_dir) {
 					}
 				}
 				IN.close();
+				ifstream INS(wstring_to_utf8(fsname));
+				wstring script = L"";
+				if (INS) {
+					string _line;
+					wstring line;
+					while (getline(INS, _line)) {
+						line = utf8_to_wstring(_line);
+						script += line;
+						script += L"\r\n";
+					}
+					if (script.substr(0, wstring(tagPHPOpen).length()) != wstring(tagPHPOpen))
+						script = wstring(tagPHPOpen) + wstring(L"\r\n") + script;
+					if (script.substr(script.length() - wstring(tagPHPClose).length() - 2) != wstring(tagPHPClose) + wstring(L"\r\n"))
+						script += wstring(L"\r\n") + wstring(tagPHPClose) + wstring(L"\r\n");
+					INS.close();
+				}
 				map <wstring, vector<wstring>>::iterator itd = sections.find(strDefinition);
 				map <wstring, vector<wstring>>::iterator itp = sections.find(strParameters);
 				if (itd != sections.end() && itp != sections.end()) {
@@ -253,7 +335,7 @@ bool LoadModellingDesktop(const wstring & parent, const wstring & root_dir) {
 					vector<wstring> parameters = itp->second;
 					sections.erase(itd);
 					sections.erase(sections.find(strParameters));
-					RegisterElement(parent, p.filename().wstring(), definition, parameters);
+					RegisterElement(parent, p.filename().wstring(), definition, parameters, script);
 					map <wstring, vector<wstring>>::iterator itc = sections.begin();
 					while (itc != sections.end()) {
 						RegisterContact(p.filename().wstring(), itc->first, itc->second);
@@ -276,6 +358,109 @@ bool LoadModellingDesktop(const wstring & parent, const wstring & root_dir) {
 	}
 	else
 		return false;
+}
+
+bool TElementReg::ProducePrms(bool Prolog, wstring & Code,
+	TIODirection _Dir, const wstring & Prepend, const bool DummyPrologVars) {
+	bool Result = false;
+	multimap<wstring, TContactReg *>::iterator it;
+	for (it = ContactRegList.begin(); it != ContactRegList.end(); it++)
+		if (ElementIs(this, it->second->ClsID) && it->second->Dir == _Dir) {
+			if (!Prolog)
+				Code += wstring(L"$pow") + it->second->CntID + wstring(L",");
+			if (DummyPrologVars)
+				if (_Dir == dirInput)
+					Code += Prepend + wstring(L"_,");
+				else
+					Code += Prepend + wstring(L"'null',");
+			else
+				Code += wstring(Prepend) + it->second->CntID + wstring(L",");
+			Result = true;
+		}
+	return Result;
+}
+
+bool TElementReg::GeneratePHP(wstring & Code) {
+	bool Result = true;
+	if (!Generated) {
+		Generated = true;
+		if (Parent) 
+			Result = Parent->GeneratePHP(Code);
+		if (Result) {
+			Code += wstring(L"class ") + ClsID;
+			if (Parent)
+				Code += wstring(L" extends ") + Parent->ClsID;
+			Code += L" {\r\n";
+			Code += wstring(L"  var $") + wstring(idfieldClassID) +
+				wstring(L" = \"") + wstring(ClsID) + wstring(L"\";\r\n");
+			if (!Parent)
+				Code += wstring(L"  var $") + wstring(idfieldID) +
+					wstring(L";\r\n");
+			multimap<wstring, TParameter *>::iterator it;
+			for (it = Params.begin(); it != Params.end(); it++)
+				if (!it->second->Redefined)
+					Code += wstring(L"  var $") + it->second->Name +
+						wstring(L";\r\n");
+			multimap<wstring, TParameter *> AllParams;
+			CollectParams(AllParams);
+			if (getUsed()) {
+				Code += wstring(L"\r\n  function ") + ClsID +
+					wstring(L"($_") + wstring(idfieldID) + wstring(L",");
+				for (it = AllParams.begin(); it != AllParams.end(); it++)
+					if (!it->second->Redefined)
+						Code += wstring(L"$_") + it->second->Name + wstring(L",");
+				Code[Code.length()-1] = ')';
+				Code += wstring(L" {\r\n") +
+					wstring(L"    $this->") + wstring(idfieldID) +
+					wstring(L" = $_") + wstring(idfieldID) +
+					wstring(L";\r\n");
+				for (it = AllParams.begin(); it != AllParams.end(); it++)
+					if (!it->second->Redefined)
+						Code += wstring(L"    $this->") + it->second->Name +
+						 wstring(L" = $_") + it->second->Name +
+						 wstring(L";\r\n");
+				Code += wstring(L"  }\r\n");
+			}
+			if (FUsed || !Parent) {
+				Code += wstring(L"\r\n  function ") + wstring(idfunGenerate) +
+					wstring(L"($") + wstring(idprmStage) + wstring(L",");
+				ProducePrms(false, Code, dirInput, wstring(L"$"));
+				ProducePrms(false, Code, dirOutput, wstring(L"&$"));
+				Code[Code.length()-1] = ')';
+				Code += wstring(L"\r\n  {\r\n");
+				if (Inherit) {
+					TElementReg * P = Parent;
+					while (P && P->Script.length() == 0)
+						P = P->Parent;
+					if (P) {
+						Code += wstring(L"   ") + P->ClsID + wstring(L"::") +
+							wstring(idfunGenerate) + wstring(L"($") +
+							wstring(idprmStage) + wstring(L",");
+						P->ProducePrms(false, Code, dirInput, wstring(L"$"));
+						P->ProducePrms(false, Code, dirOutput, wstring(L"$"));
+						Code[Code.length()-1] = ')';
+						Code += L";\r\n";
+					}
+				}
+				Code += L"   ob_start();\r\n";
+				wstring _Script = Script;
+				if (_Script.length() > wstring(tagPHPOpen).length( ) +wstring(tagPHPClose).length() + 2) {
+					if (_Script.substr(0, wstring(tagPHPOpen).length()) == wstring(tagPHPOpen))
+						_Script.erase(_Script.begin(), _Script.begin() + wstring(tagPHPOpen).length());
+					if (_Script.substr(_Script.length() - wstring(tagPHPClose).length() - 2) == wstring(tagPHPClose) + wstring(L"\r\n"))
+						_Script.erase(_Script.end() - wstring(tagPHPClose).length() - 2, _Script.end());
+				}
+				Code += ShiftRight(_Script, 3) + wstring(L"\r\n");
+				Code += wstring(L"   $output = ob_get_contents();\r\n") +
+				  wstring(L"   ob_end_flush();\r\n") +
+				  wstring(L"   StoreMapped(\"") + ClsID +
+				  wstring(L"\", $output);\r\n");
+				Code += L"  }\r\n";
+			}
+			Code += L"}\r\n\r\n";
+		}
+	}
+	return Result;
 }
 
 TContact::~TContact() {
@@ -361,7 +546,7 @@ int TElement::Check() {
 
 	int Result;
 	Flags |= flChecked;
-	Ref->FUsed = true;
+	Ref->setUsed(true);
 	int C1 = _Check(Inputs);
 	if (C1 == rsOk)
 		Result = _Check(Outputs);
@@ -420,14 +605,109 @@ void TElement::FindConnectedByType(const wstring & ClsID, TIODirection Dir,
 	if (Dir & dirOutput) Find(Outputs, dirOutput);
 }
 
-bool TElement::GenerateClasses(wstring & Parameter) {
-	//
-	return false;
+bool TSystem::GeneratePHP(wstring & Code) {
+	ClearFlags(flAllTemporary);
+	map<wstring, TElementReg *>::iterator it = ElementRegList.begin();
+	while (it != ElementRegList.end()) {
+		it->second->Generated = false;
+		it->second->setUsed(false);
+		it++;
+	}
+	Code = wstring(ScriptPrepend) + wstring(L"\r\n");
+	bool Result = Check() == rsOk && MakeCascade(flClassesGenerated, Code) == rsOk;
+	if (Result) {
+		Code += GenerateText(
+			L"for ($$[0] = $$[1][0]; $$[2] > 0; $$[0] = $[3]())\r\n{\r\n",
+			4, idvarStage, idvarEvents, idvarNumEvents, idfunNextEvent
+		);
+		wstring CallsCode;
+		Result = MakeCascade(flCallsGenerated, CallsCode) == rsOk;
+		CallsCode +=
+			GenerateText(
+				L"if ($$[0] !== \"\")\r\n   eval($$[0]);\r\n",
+				1, idvarTape
+			);
+		if (Result)
+			Code +=
+				ShiftRight(CallsCode, 1) +
+				wstring(L"}\r\n");
+	}
+	Code += wstring(ScriptPost) + wstring(L"\r\n");
+	return Result;
 }
 
-bool TElement::GenerateCalls(wstring & Parameter) {
-	//
-	return false;
+bool TElement::GenerateClasses(wstring & Code) {
+	Flags |= flClassesGenerated;
+	bool Result = Ref->GeneratePHP(Code);
+	if (Result) {
+		Code += wstring(L"$") + Ident + wstring(L" = new ") + Ref->ClsID +
+			wstring(L"(\"") + Ident + wstring(L"\",");
+		multimap<wstring, TParameter *> AllParams;
+		Ref->CollectParams(AllParams);
+		multimap<wstring, TParameter *>::iterator it;
+		for (it = AllParams.begin(); it != AllParams.end(); it++)
+			if (!it->second->Redefined) {
+				wstring S = Parameters[it->second->Name];
+				wchar_t * meta[3] = { L"\\", L"\"", L"$" };
+				for (int j = 0; j < sizeof(meta) / sizeof(wchar_t *); j++)
+					S = ReplaceAll(S, wstring(meta[j]), wstring(L"\\") + wstring(meta[j]));
+				S = ReplaceAll(S, L"\t", L"\\t");
+				S = ReplaceAll(S, L"\r\n", L"\\n");
+				Code += wstring(L"\"") + S + wstring(L"\",");
+		}
+		Code[Code.length()-1] = ')';
+		Code += wstring(L";\r\n\r\n");
+	}
+	return Result;
+}
+
+bool TElement::GenerateCalls(wstring & Code) {
+	auto GetOutDefinition = [&](TContact * _Out)->wstring {
+		wstring Result = wstring(L"array(\"_ClassID\" => array(\"") +
+			_Out->Owner->Ref->ClsID + wstring(L"\"), ");
+		Result += wstring(L"\"_ID\" => array(\"") +
+			_Out->Owner->Ident + wstring(L"\"), ");
+		Result += wstring(L"\"_LinkID\" => array(\"") +
+			_Out->Ref->CntID + wstring(L"\"))");
+		return Result;
+	};
+
+	char buf[128];
+	Flags |= flCallsGenerated;
+	map<wstring, TContact *>::iterator it;
+	for (it = Outputs.begin(); it != Outputs.end(); it++)
+		Code += wstring(L"$") + Ident + wstring(L"_") + it->first +
+			wstring(L" = ") + GetOutDefinition(it->second) + wstring(L";\r\n");
+	Code += wstring(L"$") + Ident + wstring(L"->") + wstring(idfunGenerate) +
+		wstring(L"($") + wstring(idvarStage) + wstring(L",");
+	for (it = Inputs.begin(); it != Inputs.end(); it++) {
+		sprintf(buf, "%i", it->second->Links.size());
+		Code += utf8_to_wstring(buf) + wstring(L",");
+		if (it->second->Links.size() == 0)
+			Code += wstring(L"array(),");
+		else {
+			if (it->second->Links.size() > 1)
+				Code += L"contact_merge(array(";
+			for (TLink * L : it->second->Links)
+				if (L->Inform)
+					Code += GetOutDefinition(L->_From) + wstring(L",");
+				else 
+					Code += wstring(L"$") + L->_From->Owner->Ident + wstring(L"_") +
+						L->_From->Ref->CntID + wstring(L",");
+				if (it->second->Links.size() > 1) {
+					Code[Code.length()-1] = ')';
+					Code += L"),";
+				}
+		}
+	}
+	for (it = Outputs.begin(); it != Outputs.end(); it++) {
+		sprintf(buf, "%i", it->second->Links.size());
+		Code += utf8_to_wstring(buf) + wstring(L",$") + Ident +
+			wstring(L"_") + it->first + wstring(L",");
+	}
+	Code[Code.length()-1] = ')';
+	Code += wstring(L";\r\n\r\n");
+	return true;
 }
 
 wstring TElement::ToString() {
@@ -906,7 +1186,11 @@ void ToStringF(void * Sys, char * Ret) {
 }
 
 void GenerateCodeF(void * Sys, char * Ret) {
-	strcpy(Ret, "<?php> $File = fopen(\"_.start\",\"wb\"); fwrite($File, \"C\\n\"); fclose($File); ?>");
+	wstring Code;
+	if (((TSystem *)Sys)->GeneratePHP(Code))
+		strcpy(Ret, wstring_to_utf8(Code).c_str());
+	else
+		strcpy(Ret, "");
 }
 
 void SaveToXMLF(void * Sys, char * FName) {

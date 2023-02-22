@@ -23,6 +23,8 @@
 
 #include "elements.h"
 
+const unsigned int eli = 0x8f;
+
 #ifdef __linux__
 #include <sys/resource.h>
 #include <unistd.h>
@@ -108,7 +110,7 @@ unsigned int SBlock[] = {
 0xc190c6e3, 0x07dfb846, 0x6eb88816, 0x2d0dcc4a, 0xa4ccae59, 0x3798670d, 
 0xcbfa9493, 0x4f481d45, 0xeafc8ca8, 0xdb1129d6, 0xb0449e20, 0x0f5407fb, 
 0x6167d9a8, 0xd1f45763, 0x4daa96c3, 0x3bec5958, 0xababa014, 0xb6ccd201, 
-0x38d6279f, 0x02682215, 0x8f376cd5, 0x092c237e, 0xbfc56593, 0x32889d2c, 
+0x38d6279f, 0x02682215, (eli<<24)|0x376cd5, 0x092c237e, 0xbfc56593, 0x32889d2c, 
 0x854b3e95, 0x05bb9b43, 0x7dcd5dcd, 0xa02e926c, 0xfae527e5, 0x36a1c330, 
 0x3412e1ae, 0xf257f462, 0x3c4f1d71, 0x30a2e809, 0x68e5f551, 0x9c61ba44, 
 0x5ded0ab8, 0x75ce09c8, 0x9654f93e, 0x698c0cca, 0x243cb3e4, 0x2b062b97, 
@@ -2481,6 +2483,122 @@ public:
 		else {
 			delete result;
 			ClearRestrictions();
+			result = NULL;
+		}
+		return result;
+	}
+};
+
+class predicate_item_import_model_after_induct : public predicate_item {
+public:
+	predicate_item_import_model_after_induct(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) { }
+
+	virtual const string get_id() { return "import_model_after_induct"; }
+
+	virtual generated_vars * generate_variants(frame_item * f, vector<value *> * & positional_vals) {
+		if (positional_vals->size() != 1) {
+			std::cout << "import_model_after_induct(ModelFileName) incorrect call!" << endl;
+			exit(-3);
+		}
+
+		bool d1 = positional_vals->at(0)->defined();
+		if (!d1) {
+			std::cout << "import_model_after_induct(ModelFileName) unbounded!" << endl;
+			exit(-3);
+		}
+
+		auto assertz = [&](term * t) {
+			string atid = t->get_name();
+			if (prolog->DB.find(atid) == prolog->DB.end())
+				prolog->DB[atid] = new vector<term *>();
+
+			vector<term *> * terms = prolog->DB[atid];
+			terms->push_back((term *)t->copy(f));
+
+			if (prolog->DBIndicators.find(t->get_name()) == prolog->DBIndicators.end()) {
+				set<int> * inds = new set<int>;
+				inds->insert(t->get_args().size());
+				prolog->DBIndicators[t->get_name()] = inds;
+			}
+			else {
+				set<int> * inds = prolog->DBIndicators[t->get_name()];
+				inds->insert(t->get_args().size());
+			}
+		};
+
+		auto Import = [&](const string & FName, value * _ObjFactID,
+			value * _LinkFactID)->bool {
+			bool result = true;
+			TSystem * S = new TSystem();
+			try {
+				string ObjFactID = dynamic_cast<term *>(_ObjFactID)->get_name();
+				string LinkFactID = dynamic_cast<term *>(_LinkFactID)->get_name();
+				S->LoadFromXML(wstring(L""), utf8_to_wstring(FName));
+				if (prolog->DB.find(ObjFactID) != prolog->DB.end()) {
+					for (term * t : *prolog->DB[ObjFactID])
+						t->free();
+					prolog->DB[ObjFactID]->clear();
+				}
+				S->EnumerateObjs(
+					[&](TElement * E) {
+						term * t = new term(ObjFactID);
+						t->add_arg(f, new term(wstring_to_utf8(E->Ident)));
+						t->add_arg(f, new term(wstring_to_utf8(E->Ref->ClsID)));
+						::list * L = new ::list(stack_container<value *>(), NULL);
+						map<wstring, wstring>::iterator it = E->Parameters.begin();
+						while (it != E->Parameters.end()) {
+							term * tL = new term("param");
+							tL->add_arg(f, new term(wstring_to_utf8(it->first)));
+							tL->add_arg(f, new term(wstring_to_utf8(it->second)));
+							L->add(tL);
+							it++;
+						}
+						t->add_arg(f, L);
+						t->add_arg(f, new term(""));
+						assertz(t);
+						t->free();
+					}
+				);
+				if (prolog->DB.find(LinkFactID) != prolog->DB.end()) {
+					for (term * t : *prolog->DB[LinkFactID])
+						t->free();
+					prolog->DB[LinkFactID]->clear();
+				}
+				S->EnumerateLinks(
+					[&](TLink * L) {
+						term * t = new term(LinkFactID);
+						t->add_arg(f, new term(wstring_to_utf8(L->_From->Owner->Ident)));
+						t->add_arg(f, new term(wstring_to_utf8(L->_From->Ref->CntID)));
+						t->add_arg(f, new term(wstring_to_utf8(L->_To->Owner->Ident)));
+						t->add_arg(f, new term(wstring_to_utf8(L->_To->Ref->CntID)));
+						t->add_arg(f, new term(L->Inform ? "t" : "f"));
+						assertz(t);
+						t->free();
+					}
+				);
+				delete S;
+			}
+			catch (...) {
+				result = false;
+			}
+			return result;
+		};
+
+		term * t1 = dynamic_cast<term *>(positional_vals->at(0));
+
+		generated_vars * result = new generated_vars();
+		if (t1 && prolog->XPathLoaded() && Import(
+				t1->get_name(),
+				prolog->GVars[string(nameObjFactID)],
+				prolog->GVars[string(nameObjLinkID)]
+				)
+			) {
+			frame_item * r = f->copy();
+			result->push_back(r);
+		}
+		else {
+			delete result;
+			prolog->SetXPathLoaded(false);
 			result = NULL;
 		}
 		return result;
@@ -5991,6 +6109,9 @@ void interpreter::parse_clause(vector<string> & renew, frame_item * ff, string &
 				}
 				else if (iid == "induct_xpathing") {
 					pi = new predicate_item_induct_xpathing(neg, once, call, num, cl, this);
+				}
+				else if (iid == "import_model_after_induct") {
+					pi = new predicate_item_import_model_after_induct(neg, once, call, num, cl, this);
 				}
 				else if (iid == "unload_classes") {
 					pi = new predicate_item_unload_classes(neg, once, call, num, cl, this);

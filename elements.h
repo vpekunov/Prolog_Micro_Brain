@@ -24,6 +24,7 @@ using namespace boost::filesystem;
 #define infArity 32768
 
 #define strClassIni L"Class.ini"
+#define strScriptPHP L"Script.php3"
 #define strDefinition L"Definition"
 #define strParameters L"Parameters"
 #define strName L"Name"
@@ -36,6 +37,62 @@ using namespace boost::filesystem;
 #define strOutput L"Output"
 #define strSingle L"Single"
 #define strMany L"Many"
+
+#define idfunGenerate L"Generate"
+#define idfunPushCortege L"cortege_push"
+#define idfunNextEvent L"NextEvent"
+
+#define idlibAutoUtils L"autoutil.php3"
+#define idlibUserVars L"_vars.php3"
+#define idlibXPath L"XPath.class.php"
+#define idParamsFile L"params.cfg"
+#define idParamsOut L"params.out"
+#ifdef __linux__
+#define idParamsExe L"./lparams"
+#else
+#define idParamsExe L"params.exe"
+#endif
+
+#define idprmStage L"Stage"
+
+#define idvarStage L"Stage"
+#define idvarEvents L"Events"
+#define idvarNumEvents L"NumEvents"
+#define idvarTape L"Tape"
+
+#define idconstResource L"stResource"
+#define idconstInit L"stInit"
+#define idconstCall L"stCall"
+#define idconstDone L"stDone"
+
+#define idfieldClassID L"ClassID"
+#define idfieldID L"ID"
+
+#define tagPHPOpen L"<?php"
+#define tagPHPClose L"?>"
+
+#define errPHP L"<#GENERROR>"
+#define errMAIN L"!Error:"
+
+const wstring ScriptPrepend = wstring(tagPHPOpen) + wstring(L"\r\n") +
+wstring(L"include(\"") + wstring(idlibAutoUtils) + wstring(L"\");") + wstring(L"\r\n") +
+wstring(L"include(\"") + wstring(idlibXPath) + wstring(L"\");") + wstring(L"\r\n") +
+wstring(L"if (file_exists(\"") + wstring(idlibUserVars) + wstring(L"\"))") + wstring(L"\r\n") +
+wstring(L"   include(\"") + wstring(idlibUserVars) + wstring(L"\");") + wstring(L"\r\n") +
+wstring(L"\r\n") +
+wstring(L"global $XML;") + wstring(L"\r\n") +
+wstring(L"$xmlOptions = array(XML_OPTION_CASE_FOLDING => FALSE, XML_OPTION_SKIP_WHITE => TRUE);") + wstring(L"\r\n") +
+wstring(L"$XML = new XPathEngine($xmlOptions);") + wstring(L"\r\n") +
+wstring(L"$XML->importFromFile(\"_.xml\");") + wstring(L"\r\n");
+
+const wstring ScriptPost = wstring(L"CloseAsserta();") + wstring(L"\r\n") +
+wstring(L"fclose($MappedOutput);") + wstring(L"\r\n") +
+wstring(L"ChangeOutput('stdout',true);") + wstring(L"\r\n") +
+wstring(tagPHPClose);
+
+wstring GenerateText(const wchar_t * src, int n, ...);
+wstring ShiftRight(wstring S, int n);
+wstring ReplaceAll(const wstring & src, const wstring & what, const wstring & to);
 
 class TElementReg;
 class TContactReg;
@@ -93,7 +150,8 @@ void GetContactsRegByClassID(const wstring & CID, TIODirection dir, vector<TCont
 TElementReg * RegisterElement(const wstring & PCID,
 	const wstring & CID,
 	const vector<wstring> & Desc,
-	const vector<wstring> & NewPrms);
+	const vector<wstring> & NewPrms,
+	const wstring & Script);
 
 TContactReg * RegisterContact(
 	const wstring & clsID,
@@ -285,20 +343,23 @@ public:
 };
 
 class TElementReg {
+private:
+	bool FUsed;
 public:
 	TElementReg * Parent;
 	wstring ClsID;
 	wstring Name;
 	bool Inherit;
 	bool Generated;
-	bool FUsed;
+	wstring Script;
 	multimap<wstring, TParameter *> Params;
 public:
 	TElementReg(
 		const wstring & PCID,
 		const wstring & CID,
 		const vector<wstring> & Desc,
-		const vector<wstring> & NewPrms) : ClsID(CID) {
+		const vector<wstring> & NewPrms,
+		const wstring & script) : ClsID(CID), Script(script) {
 
 		Generated = false;
 		FUsed = false;
@@ -365,11 +426,20 @@ public:
 				throw logic_error("Unknown class");
 		}
 	}
+	bool getUsed() { return FUsed; }
+	void setUsed(bool Value) {
+		FUsed = Value;
+		if (Value && Inherit && Parent)
+			Parent->setUsed(true);
+	}
 	virtual void CollectParams(multimap<wstring, TParameter *> & Prms) {
 		if (Parent)
 			Parent->CollectParams(Prms);
 		Prms.insert(Params.begin(), Params.end());
 	}
+	virtual bool ProducePrms(bool Prolog, wstring & Code,
+		TIODirection _Dir, const wstring & Prepend, const bool DummyPrologVars = false);
+	virtual bool GeneratePHP(wstring & Code);
 	virtual ~TElementReg() {
 		multimap<wstring, TParameter *>::iterator it = Params.begin();
 		while (it != Params.end()) {
@@ -469,6 +539,26 @@ public:
 	}
 	virtual int Check();
 	virtual wstring ToString();
+	void EnumerateObjs(std::function<void(TElement *)> fun) {
+		map<wstring, TElement *>::iterator it = Elements.begin();
+		while (it != Elements.end()) {
+			fun(it->second);
+			it++;
+		}
+	}
+	void EnumerateLinks(std::function<void(TLink *)> fun) {
+		map<wstring, TElement *>::iterator it = Elements.begin();
+		while (it != Elements.end()) {
+			map<wstring, TContact *>::iterator itc = it->second->Outputs.begin();
+			while (itc != it->second->Outputs.end()) {
+				for (TLink * L : itc->second->Links)
+					fun(L);
+				itc++;
+			}
+			it++;
+		}
+	}
+	virtual bool GeneratePHP(wstring & Parameter);
 	virtual bool GenerateClasses(wstring & Parameter) {
 		throw logic_error("TSystem.GenerateClasses() not exists!");
 	}
