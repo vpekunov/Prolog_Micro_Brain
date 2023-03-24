@@ -323,20 +323,12 @@ public:
 			else if (Nm == strLinks) {
 				wchar_t links[1024];
 				wcsncpy(links, Val.c_str(), sizeof(links)/sizeof(wchar_t));
-#ifdef __linux__
 				wchar_t * ptr;
 				wchar_t * link = std::wcstok(links, L" ;\t", &ptr);
 				while (link) {
 					RegisterLinkType(this->ClsID, this->CntID, wstring(link));
 					link = std::wcstok(NULL, L" ;\t", &ptr);
 				}
-#else
-				wchar_t * link = wcstok(links, L" ;\t");
-				while (link) {
-					RegisterLinkType(this->ClsID, this->CntID, wstring(link));
-					link = wcstok(NULL, L" ;\t");
-				}
-#endif
 			}
 		});
 	}

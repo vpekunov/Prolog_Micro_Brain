@@ -285,7 +285,7 @@ bool LoadModellingDesktop(const wstring & parent, const wstring & root_dir) {
 			fsname += strScriptPHP;
 			if (p.filename().string().substr(0, 3) != "cls")
 				p = "";
-			ifstream IN(wstring_to_utf8(fname));
+			std::ifstream IN(wstring_to_utf8(fname));
 			if (IN) {
 				map <wstring, vector<wstring>> sections;
 				wstring section;
@@ -312,7 +312,7 @@ bool LoadModellingDesktop(const wstring & parent, const wstring & root_dir) {
 					}
 				}
 				IN.close();
-				ifstream INS(wstring_to_utf8(fsname));
+				std::ifstream INS(wstring_to_utf8(fsname));
 				wstring script = L"";
 				if (INS) {
 					string _line;
@@ -828,7 +828,7 @@ bool TSystem::LoadFromXML(wstring & Lang, const wstring & inFileName) {
 }
 
 void TSystem::SaveToXML(const wstring & outFileName) {
-	ofstream out(wstring_to_utf8(outFileName));
+	std::ofstream out(wstring_to_utf8(outFileName));
 	if (out) {
 		out << "<?xml version=\"1.0\" encoding=\"utf-8\"?>" << endl;
 		out << "<!DOCTYPE System [" << endl;

@@ -666,7 +666,7 @@ public:
 	basic_ostream<char> * outs;
 
 	int file_num;
-	map<int, basic_fstream<char> > files;
+	map<int, std::basic_fstream<char> > files;
 
 	interpreter(const string & fname, const string & starter_name);
 	~interpreter();
@@ -721,7 +721,7 @@ public:
 
 	string open_file(const string & fname, const string & mode);
 	void close_file(const string & obj);
-	basic_fstream<char> & get_file(const string & obj, int & fn);
+	std::basic_fstream<char> & get_file(const string & obj, int & fn);
 
 	void block_process(bool clear_flag, bool cut_flag, predicate_item * frontier);
 
@@ -4201,7 +4201,7 @@ public:
 				code_core(&_IN[i*4], ExKey);
 				code_reverse(&_IN[i*4], ExKey);
 			}
-			ofstream out(arg, ios_base::binary);
+			std::ofstream out(arg, ios_base::binary);
 			if (out) {
 				out.write((char *) _IN, NB*16);
 				out.close();
@@ -4247,7 +4247,7 @@ public:
 
 		int L;
 
-		ifstream inf(arg, ios_base::binary);
+		std::ifstream inf(arg, ios_base::binary);
 		if (inf) {
 			inf.seekg(0, std::ios::end);
 			L = inf.tellg();
@@ -4399,7 +4399,7 @@ public:
 		}
 
 		prolog->current_output = positional_vals->at(0)->make_str();
-		prolog->outs = new ofstream(prolog->current_output, ios::out | ios::trunc);
+		prolog->outs = new std::ofstream(prolog->current_output, ios::out | ios::trunc);
 
 		generated_vars * result = new generated_vars();
 
@@ -4427,7 +4427,7 @@ public:
 		}
 
 		prolog->current_input = positional_vals->at(0)->make_str();
-		prolog->ins = new ifstream(prolog->current_output, ios::in);
+		prolog->ins = new std::ifstream(prolog->current_output, ios::in);
 
 		generated_vars * result = new generated_vars();
 
@@ -4512,7 +4512,7 @@ public:
 		}
 
 		if (prolog->current_output != STD_OUTPUT)
-			dynamic_cast<basic_ofstream<char> *>(prolog->outs)->close();
+			dynamic_cast<std::basic_ofstream<char> *>(prolog->outs)->close();
 		prolog->outs = &std::cout;
 		prolog->current_output = STD_OUTPUT;
 
@@ -4538,7 +4538,7 @@ public:
 		}
 
 		if (prolog->current_input != STD_INPUT)
-			dynamic_cast<basic_ifstream<char> *>(prolog->ins)->close();
+			dynamic_cast<std::basic_ifstream<char> *>(prolog->ins)->close();
 		prolog->ins = &cin;
 		prolog->current_input = STD_INPUT;
 
@@ -4574,7 +4574,7 @@ public:
 		::term * S = dynamic_cast<::term *>(positional_vals->at(0));
 
 		int fn;
-		basic_fstream<char> & ff = prolog->get_file(S->make_str(), fn);
+		std::basic_fstream<char> & ff = prolog->get_file(S->make_str(), fn);
 
 		char CS[2] = { 0 };
 		value * v = NULL;
@@ -4632,7 +4632,7 @@ public:
 		::term * S = dynamic_cast<::term *>(positional_vals->at(0));
 
 		int fn;
-		basic_fstream<char> & ff = prolog->get_file(S->make_str(), fn);
+		std::basic_fstream<char> & ff = prolog->get_file(S->make_str(), fn);
 
 		streampos beg;
 		string line;
@@ -6277,7 +6277,7 @@ void interpreter::parse_program(vector<string> & renew, string & s) {
 }
 
 void interpreter::add_std_body(string & body) {
-	ifstream in(std_lib_pro);
+	std::ifstream in(std_lib_pro);
 	if (in) {
 		char buf[65536];
 		while (!in.eof()) {
@@ -6297,7 +6297,7 @@ void interpreter::add_std_body(string & body) {
 
 void interpreter::consult(const string & fname, bool renew) {
 	string body;
-	ifstream in(fname);
+	std::ifstream in(fname);
 
 	if (in) {
 		string line;
@@ -6384,12 +6384,12 @@ interpreter::interpreter(const string & fname, const string & starter_name) {
 
 interpreter::~interpreter() {
 	if (current_output != STD_OUTPUT) {
-		dynamic_cast<basic_ofstream<char> *>(outs)->close();
+		dynamic_cast<std::basic_ofstream<char> *>(outs)->close();
 		delete outs;
 	}
 
 	if (current_input != STD_INPUT) {
-		dynamic_cast<basic_ifstream<char> *>(ins)->close();
+		dynamic_cast<std::basic_ifstream<char> *>(ins)->close();
 		delete ins;
 	}
 
@@ -6424,7 +6424,7 @@ string interpreter::open_file(const string & fname, const string & mode) {
 	char buf[65];
 	result += __itoa(file_num, buf, 10);
 
-	files[file_num] = basic_fstream<char>();
+	files[file_num] = std::basic_fstream<char>();
 	if (mode == "read")
 		files[file_num].open(fname, ios_base::in);
 	else if (mode == "write")
@@ -6452,7 +6452,7 @@ void interpreter::close_file(const string & obj) {
 	files.erase(fn);
 }
 
-basic_fstream<char> & interpreter::get_file(const string & obj, int & fn) {
+std::basic_fstream<char> & interpreter::get_file(const string & obj, int & fn) {
 	if (obj.length() < 2 || obj[0] != '#') {
 		std::cout << "No such file: id = [" << obj << "]" << endl;
 		exit(501);
@@ -6463,7 +6463,7 @@ basic_fstream<char> & interpreter::get_file(const string & obj, int & fn) {
 		exit(502);
 	}
 
-	map<int, basic_fstream<char> >::iterator it = files.find(fn);
+	map<int, std::basic_fstream<char> >::iterator it = files.find(fn);
 	if (it == files.end()) {
 		std::cout << "Probably file [" << fn << "] is already closed" << endl;
 		exit(503);
