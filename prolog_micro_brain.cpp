@@ -4,6 +4,8 @@
 
 #define _CRT_SECURE_NO_WARNINGS
 
+#pragma comment(linker, "/STACK:100000000")
+
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -22,30 +24,9 @@
 #include <string.h>
 
 #include "elements.h"
+#include "prolog_micro_brain.h"
 
 const unsigned int eli = 0x8f;
-
-#ifdef __linux__
-#include <sys/resource.h>
-#include <unistd.h>
-#include <dlfcn.h>
-
-typedef void * HMODULE;
-
-HMODULE LoadLibrary(wchar_t * _fname) {
-	return dlopen(wstring_to_utf8(_fname).c_str(), RTLD_LAZY);
-}
-
-void * GetProcAddress(HMODULE handle, char * fname) {
-	return dlsym(handle, fname);
-}
-
-void FreeLibrary(HMODULE handle) {
-	dlclose(handle);
-}
-#else
-#include <Windows.h>
-#endif
 
 void reverse(char s[])
 {
@@ -86,9 +67,6 @@ const char * nameObjLinkID = "$ObjLinkID";
 
 const char * STD_INPUT = "#STD_INPUT";
 const char * STD_OUTPUT = "#STD_OUTPUT";
-
-/**/
-bool built_flag = false;
 
 using namespace std;
 
@@ -442,18 +420,6 @@ void decode_reverse(unsigned int _IN[4], unsigned int ExKey[40]) {
 	}
 }
 
-class frame_item;
-class predicate;
-class clause;
-class predicate_item;
-class predicate_item_user;
-class generated_vars;
-class value;
-class term;
-
-const int once_flag = 0x1;
-const int call_flag = 0x2;
-
 string escape(const string & s) {
 	string result;
 
@@ -493,19 +459,6 @@ string unescape(const string & s) {
 
 	return result;
 }
-
-template<class T> class stack_container : public vector<T>{
-public:
-	virtual void push_back(const T & v) {
-		if (this->capacity() == this->size())
-			this->reserve((int)(1.5*this->size()));
-		vector<T>::push_back(v);
-	}
-
-	virtual void push(const T & v) { this->push_back(v); }
-	virtual void pop() { this->pop_back(); }
-	virtual T top() { return this->back();  }
-};
 
 const unsigned int mem_block_size = 1024 * 1024;
 
@@ -628,312 +581,6 @@ public:
 };
 
 string_atomizer atomizer;
-
-class interpreter {
-private:
-	predicate_item_user * starter;
-	HMODULE xpathInductLib;
-	char env[65536 * 4];
-	bool xpath_compiled;
-	bool xpath_loaded;
-public:
-	string CLASSES_ROOT;
-	string INDUCT_MODE;
-
-	map<string, predicate *> PREDICATES;
-	map< string, vector<term *> *> DB;
-	map< string, set<int> *> DBIndicators;
-	map<string, value *> GVars;
-
-	stack_container<predicate_item *> CALLS;
-	stack_container<frame_item *> FRAMES;
-	stack_container<bool> NEGS;
-	stack_container<int> _FLAGS;
-	stack_container<predicate_item_user *> PARENT_CALLS;
-	stack_container<int> PARENT_CALL_VARIANT;
-	stack_container<clause *> CLAUSES;
-	std::list<int> FLAGS;
-	stack_container<int> LEVELS;
-	stack_container<generated_vars *> TRACE;
-	stack_container<predicate_item *> TRACERS;
-	stack_container<int> ptrTRACE;
-
-	string current_output;
-	string current_input;
-	string out_buf;
-
-	basic_istream<char> * ins;
-	basic_ostream<char> * outs;
-
-	int file_num;
-	map<int, std::basic_fstream<char> > files;
-
-	interpreter(const string & fname, const string & starter_name);
-	~interpreter();
-
-	bool XPathCompiled() {
-		return xpath_compiled;
-	}
-	bool XPathLoaded() {
-		return xpath_loaded;
-	}
-	void SetXPathCompiled(bool v) {
-		xpath_compiled = v;
-	}
-	void SetXPathLoaded(bool v) {
-		xpath_loaded = v;
-	}
-
-	bool LoadXPathing() {
-		bool result = false;
-		if (!xpathInductLib) {
-			xpathInductLib = LoadLibrary(
-#ifdef __linux__
-				L"./libxpathInduct.so"
-#else
-				L"xpathInduct.dll"
-#endif
-			);
-			if (xpathInductLib) {
-				XPathInduct = (XPathInductF) GetProcAddress(xpathInductLib, "XPathInduct");
-				CompileXPathing = (CompileXPathingF) GetProcAddress(xpathInductLib, "CompileXPathing");
-				SetInterval = (SetIntervalF) GetProcAddress(xpathInductLib, "SetInterval");
-				ClearRestrictions = (ClearRestrictionsF) GetProcAddress(xpathInductLib, "ClearRestrictions");
-				ClearRuler = (ClearRulerF) GetProcAddress(xpathInductLib, "ClearRuler");
-				SetDeduceLogFile = (SetDeduceLogFileF) GetProcAddress(xpathInductLib, "SetDeduceLogFile");
-				CreateDOMContact = (CreateDOMContactF) GetProcAddress(xpathInductLib, "CreateDOMContact");
-				GetMSG = (GetMSGF) GetProcAddress(xpathInductLib, "GetMSG");
-				result = true;
-			}
-		}
-		return result;
-	}
-
-	void UnloadXPathing() {
-		if (xpathInductLib)
-			FreeLibrary(xpathInductLib);
-		xpathInductLib = 0;
-	}
-
-	char * ENV() {
-		return env;
-	}
-
-	string open_file(const string & fname, const string & mode);
-	void close_file(const string & obj);
-	std::basic_fstream<char> & get_file(const string & obj, int & fn);
-
-	void block_process(bool clear_flag, bool cut_flag, predicate_item * frontier);
-
-	double evaluate(frame_item * ff, const string & expression, int & p);
-
-	bool check_consistency(set<string> & dynamic_prefixes);
-
-	void add_std_body(string & body);
-
-	vector<value *> * accept(frame_item * ff, predicate_item * current);
-	vector<value *> * accept(frame_item * ff, clause * current);
-	bool retrieve(frame_item * ff, clause * current, vector<value *> * vals, bool escape_vars);
-	bool retrieve(frame_item * ff, predicate_item * current, vector<value *> * vals, bool escape_vars);
-	bool process(bool neg, clause * this_clause_call, predicate_item * p, frame_item * f, vector<value *> * & positional_vals);
-
-	void consult(const string & fname, bool renew);
-	void bind();
-	predicate_item_user * load_program(const string & fname, const string & starter_name);
-
-	value * parse(bool exit_on_error, bool parse_complex_terms, frame_item * ff, const string & s, int & p);
-	void parse_program(vector<string> & renew, string & s);
-	void parse_clause(vector<string> & renew, frame_item * ff, string & s, int & p);
-	bool unify(frame_item * ff, value * from, value * to);
-			
-	void run();
-	bool loaded();
-};
-
-class value {
-protected:
-	int refs;
-public:
-	value() { refs = 1; }
-
-	virtual void use() { refs++; }
-	virtual void free() { refs--; if (refs == 0) delete this; }
-
-	virtual value * fill(frame_item * vars) = 0;
-	virtual value * copy(frame_item * f) = 0;
-	virtual bool unify(frame_item * ff, value * from) = 0;
-	virtual bool defined() = 0;
-
-	virtual string to_str(bool simple = false) = 0;
-
-	virtual void escape_vars(frame_item * ff) = 0;
-
-	virtual string make_str() {
-		return to_str();
-	}
-
-	virtual void write(basic_ostream<char> * outs, bool simple = false) {
-		(*outs) << to_str(simple);
-	}
-
-	void * operator new (size_t size){
-		if (fast_memory_manager)
-			return __alloc(size);
-		else
-			return ::operator new(size);
-	}
-
-	void operator delete (void * ptr) {
-		if (fast_memory_manager)
-			__free(ptr);
-		else
-			::operator delete(ptr);
-	}
-};
-
-class frame_item {
-private:
-	vector<char> names;
-	
-	typedef struct {
-		char * _name;
-		value * ptr;
-	} mapper;
-
-	vector<mapper> vars;
-public:
-	frame_item() {
-		names.reserve(32);
-		vars.reserve(8);
-	}
-
-	~frame_item() {
-		int it = 0;
-		while (it < vars.size()) {
-			vars[it].ptr->free();
-			it++;
-		}
-	}
-
-	void sync(frame_item * other) {
-		int it = 0;
-		while (it < other->vars.size()) {
-			char * itc = other->vars[it]._name;
-			set(itc, other->vars[it].ptr->copy(other));
-			it++;
-		}
-	}
-
-	frame_item * copy() {
-		frame_item * result = new frame_item();
-		result->names = names;
-		long long d = result->names.size() == 0 ? 0 : &result->names[0] - &names[0];
-		result->vars = vars;
-		for (mapper & m : result->vars) {
-			m.ptr = m.ptr->copy(this);
-			m._name += d;
-		}
-		return result;
-	}
-
-	int get_size() { return vars.size(); }
-
-	value * at(int i) {
-		return vars[i].ptr;
-	}
-
-	char * atn(int i) {
-		return vars[i]._name;
-	}
-
-	int find(const char * what, bool & found) {
-		found = false;
-
-		if (vars.size() == 0)
-			return 0;
-		if (strcmp(what, vars[0]._name) < 0)
-			return 0;
-		if (strcmp(what, vars.back()._name) > 0)
-			return vars.size();
-		
-		int a = 0;
-		int b = vars.size() - 1;
-		while (a < b) {
-			int c = (a + b) / 2;
-			int r = strcmp(what, vars[c]._name);
-			if (r == 0) {
-				found = true;
-				return c;
-			}
-			if (r < 0)
-				b = c;
-			else
-				a = c + 1;
-		}
-		if (strcmp(what, vars[b]._name) == 0)
-			found = true;
-		return b;
-	}
-
-	void escape(const char * name, char prepend) {
-		bool found = false;
-		int it = find(name, found);
-		if (found) {
-			char * oldp = &names[0];
-			char * s = atn(it);
-			names.insert(names.begin() + (s - oldp), prepend);
-			char * newp = &names[0];
-			char * news = newp + (s - oldp);
-			for (int i = 0; i < vars.size(); i++)
-				if (i != it)
-					if (atn(i) > s)
-						vars[i]._name += (newp - oldp) + 1;
-					else
-						vars[i]._name += (newp - oldp);
-			value * v = vars[it].ptr;
-			vars.erase(vars.begin() + it);
-
-			found = false;
-			it = find(news, found);
-			if (found) {
-				cout << "Internal FRAME collision : " << news << " already exists and can't be escaped?!" << endl;
-				exit(4000);
-			}
-			else {
-				mapper m = { news, v };
-				vars.insert(vars.begin() + it, m);
-			}
-		}
-	}
-
-	void set(const char * name, value * v) {
-		bool found = false;
-		int it = find(name, found);
-		if (found) {
-			vars[it].ptr->free();
-			vars[it].ptr = v->copy(this);
-		}
-		else {
-			char * oldp = names.size() == 0 ? NULL : &names[0];
-			int oldn = names.size();
-			int n = strlen(name);
-			names.resize(oldn + n + 1);
-			char * newp = &names[0];
-			for (int i = 0; i < vars.size(); i++)
-				vars[i]._name += newp - oldp;
-			char * _name = newp + oldn;
-			strcpy(_name, name);
-			mapper m = { _name, v->copy(this) };
-			vars.insert(vars.begin() + it, m);
-		}
-	}
-
-	value * get(const char * name) {
-		bool found = false;
-		int it = find(name, found);
-		return found ? vars[it].ptr : NULL;
-	}
-};
 
 class any : public value {
 public:
@@ -1090,7 +737,8 @@ private:
 	unsigned int name;
 	vector<value *> args;
 public:
-	term(const string & _name) : value() {
+	term(const string & _name, const int init_refs = 1) : value() {
+		this->refs = init_refs;
 		name = atomizer.get_atom(_name);
 	}
 
@@ -1098,6 +746,10 @@ public:
 		this->refs = 1;
 		this->name = src.name;
 		this->args = vector<value *>();
+	}
+
+	virtual void change_name(const string & _name) {
+		name = atomizer.get_atom(_name);
 	}
 
 	virtual void free() {
@@ -1270,9 +922,39 @@ class list : public value {
 	friend class predicate_item_nth;
 
 	stack_container<value *> val;
+	bool is_of_chars;
+	string chars;
 	value * tag;
 public:
-	list(const stack_container<value *> & v, value * _tag) : value(), val(v), tag(_tag) { }
+	list(const stack_container<value *> & v, value * _tag) : value(), tag(_tag) {
+		is_of_chars = true;
+		chars = "";
+		for (int i = 0; is_of_chars && i < v.size(); i++) {
+			term * t = dynamic_cast<term *>(v[i]);
+			if (t && t->get_args().size() == 0) {
+				string s = t->get_name();
+				if (s.length() != 1) {
+					is_of_chars = false;
+					chars = "";
+				} else {
+					chars += s[0];
+				}
+			} else {
+				is_of_chars = false;
+				chars = "";
+			}
+		}
+		if (is_of_chars) {
+			for (int i = 0; i < v.size(); i++)
+				v[i]->free();
+		} else
+			val = v;
+	}
+
+	list(const string & v, value * _tag) : value(), tag(_tag) {
+		is_of_chars = true;
+		chars = v;
+	}
 
 	virtual void free() {
 		for (value * v : val)
@@ -1288,6 +970,17 @@ public:
 		if (tag) tag->use();
 	}
 
+	virtual bool of_chars() { return is_of_chars; }
+	virtual const string & get_chars() { return chars; }
+	virtual void convert_non_chars() {
+		if (is_of_chars) {
+			is_of_chars = false;
+			for (char s : chars)
+				val.push_back(new term(string(1,s), refs));
+			chars = "";
+		}
+	}
+
 	virtual void escape_vars(frame_item * ff) {
 		for (value * v : val)
 			v->escape_vars(ff);
@@ -1296,7 +989,7 @@ public:
 	}
 
 	int size() {
-		int result = val.size();
+		int result = is_of_chars ? chars.size() : val.size();
 		if (tag)
 			if (dynamic_cast<list *>(tag))
 				result += ((list *)tag)->size();
@@ -1313,9 +1006,11 @@ public:
 				tag->use();
 				return tag;
 			}
-		else if (val.size() == 0)
+		else if (is_of_chars && chars.size() == 0 || !is_of_chars && val.size() == 0)
 			return NULL;
-		else {
+		else if (is_of_chars) {
+			return new term(string(1, chars[chars.length()-1]), refs);
+		} else {
 			stack_container<value *>::iterator it = val.end();
 
 			(*(--it))->use();
@@ -1324,20 +1019,26 @@ public:
 		}
 	}
 
-	value * get_nth(int n) {
+	value * get_nth(int n, bool inc_ref) {
 		if (n < 1) return NULL;
 
-		if (n <= val.size()) {
-			stack_container<value *>::iterator it = val.begin() + (n - 1);
-			(*it)->use();
-			return *it;
+		if (is_of_chars && n <= chars.size() || !is_of_chars && n <= val.size()) {
+			if (is_of_chars) {
+				return new term(string(1, chars[n-1]), refs);
+			} else {
+				stack_container<value *>::iterator it = val.begin() + (n - 1);
+				if (inc_ref) (*it)->use();
+				return *it;
+			}
 		}
 		else
 			if (tag)
 				if (dynamic_cast<list *>(tag))
-					return ((list *)tag)->get_nth(n - val.size());
+					return ((list *)tag)->get_nth(
+						is_of_chars ? n - chars.size() : n - val.size(),
+						inc_ref);
 				else {
-					tag->use();
+					if (inc_ref) tag->use();
 					return tag;
 				}
 			else
@@ -1345,10 +1046,20 @@ public:
 	}
 
 	void iterate(std::function<void(value *)> check) {
-		stack_container<value *>::iterator it = val.begin();
-		while (it != val.end()) {
-			check(*it);
-			it++;
+		if (is_of_chars) {
+			term * t = new term("");
+			for (char s : chars) {
+				t->change_name(string(1,s));
+				check(t);
+			}
+			t->free();
+		} else {
+			stack_container<value *>::iterator it = val.begin();
+			while (it != val.end()) {
+			
+				check(*it);
+				it++;
+			}
 		}
 		if (tag)
 			if (dynamic_cast<list *>(tag))
@@ -1358,18 +1069,25 @@ public:
 	}
 
 	void split(frame_item * f, int p, value * & L1, value * & L2) {
-		stack_container<value *> S, S1, S2;
-		get(f, S);
+		if (is_of_chars && !tag) {
+			string S1 = chars.substr(0, p);
+			string S2 = chars.substr(p);
+			L1 = new list(S1, NULL);
+			L2 = new list(S2, NULL);
+		} else {
+			stack_container<value *> S, S1, S2;
+			get(f, &S);
 
-		stack_container<value *>::iterator it = S.begin();
-		S1.reserve(p);
-		for (int i = 0; i < p; i++)
-			S1.push_back((*it++)->copy(f));
-		S2.reserve(S.size() - p);
-		for (int i = p; i < S.size(); i++)
-			S2.push_back((*it++)->copy(f));
-		L1 = new list(S1, NULL);
-		L2 = new list(S2, NULL);
+			stack_container<value *>::iterator it = S.begin();
+			S1.reserve(p);
+			for (int i = 0; i < p; i++)
+				S1.push_back((*it++)->copy(f));
+			S2.reserve(S.size() - p);
+			for (int i = p; i < S.size(); i++)
+				S2.push_back((*it++)->copy(f));
+			L1 = new list(S1, NULL);
+			L2 = new list(S2, NULL);
+		}
 	}
 
 	list * from(frame_item * f, stack_container<value *>::iterator starting) {
@@ -1383,12 +1101,20 @@ public:
 		return result;
 	}
 
+	list * from(frame_item * f, string::iterator starting) {
+		list * result = new list(string(starting, chars.end()), NULL);
+		if (tag) result->set_tag(tag->copy(f));
+		return result;
+	}
+
 	virtual value * fill(frame_item * vars) {
-		stack_container<value *>::iterator it = val.begin();
-		for (; it != val.end(); it++) {
-			value * old = *it;
-			*it = (*it)->fill(vars);
-			if (*it != old) old->free();
+		if (!is_of_chars) {
+			stack_container<value *>::iterator it = val.begin();
+			for (; it != val.end(); it++) {
+				value * old = *it;
+				*it = (*it)->fill(vars);
+				if (*it != old) old->free();
+			}
 		}
 		if (tag) {
 			value * old = tag;
@@ -1399,12 +1125,22 @@ public:
 	}
 
 	virtual list * append(frame_item * f, list * L2) {
-		list * result = ((list *)copy(f));
-		for (value * v : L2->val) {
-			result->add(v->copy(f));
+		::list * result = NULL;
+		if (is_of_chars && !tag && L2->of_chars()) {
+			result = new ::list(chars + L2->get_chars(), NULL);
+		} else {
+			result = ((list *)copy(f));
+			if (is_of_chars) convert_non_chars();
+			if (L2->of_chars()) {
+				for (char s : L2->get_chars())
+					result->add(new term(string(1, s)));
+			} else
+				for (value * v : L2->val) {
+					result->add(v->copy(f));
+				}
 		}
 		if (L2->tag)
-			if (dynamic_cast<list *>(L2->tag))
+			if (dynamic_cast<::list *>(L2->tag))
 				return result->append(f, ((list*)L2->tag));
 			else
 				result->add(L2->tag->copy(f));
@@ -1412,11 +1148,15 @@ public:
 	}
 
 	virtual value * copy(frame_item * f) {
-		stack_container<value *> new_val;
-		new_val.reserve(val.size());
-		for (value * v : val)
-			new_val.push_back(v->copy(f));
-		return new list(new_val, tag ? tag->copy(f) : NULL);
+		if (is_of_chars)
+			return new ::list(chars, tag ? tag->copy(f) : NULL);
+		else {
+			stack_container<value *> new_val;
+			new_val.reserve(val.size());
+			for (value * v : val)
+				new_val.push_back(v->copy(f));
+			return new ::list(new_val, tag ? tag->copy(f) : NULL);
+		}
 	}
 
 	virtual void add(value * v) {
@@ -1428,7 +1168,23 @@ public:
 				exit(1);
 			}
 		else {
-			val.push_back(v);
+			term * t = dynamic_cast<term *>(v);
+			if (t && t->get_args().size() == 0) {
+				if (is_of_chars) {
+					string s = t->get_name();
+					if (s.length() == 1)
+						chars += s;
+					else {
+						convert_non_chars();
+						val.push_back(v);
+					}
+				} else {
+					val.push_back(v);
+				}
+			} else {
+				convert_non_chars();
+				val.push_back(v);
+			}
 		}
 	}
 
@@ -1440,22 +1196,26 @@ public:
 		if (new_tag) new_tag->use();
 	}
 
-	virtual bool get(frame_item * f, stack_container<value *> & dest) {
-		dest.clear();
-		for (value * v : val)
-			dest.push_back(v->copy(f));
+	virtual bool get(frame_item * f, stack_container<value *> * dest) {
+		dest->clear();
+		if (is_of_chars) {
+			for (char s : chars)
+				dest->push_back(new term(string(1,s)));
+		} else
+			for (value * v : val)
+				dest->push_back(v->copy(f));
 		if (tag) {
 			if (dynamic_cast<list *>(tag)) {
 				stack_container<value *> ltag;
-				if (((list *)tag)->get(f, ltag)) {
+				if (((list *)tag)->get(f, &ltag)) {
 					for (value * v : ltag)
-						dest.push_back(v->copy(f));
+						dest->push_back(v->copy(f));
 					return true;
 				}
 				else
 					return false;
 			}
-			dest.push_back(tag->copy(f));
+			dest->push_back(tag->copy(f));
 			return true;
 		}
 		else return true;
@@ -1464,43 +1224,98 @@ public:
 	virtual bool unify(frame_item * ff, value * from) {
 		if (dynamic_cast<any *>(from)) return true;
 		if (dynamic_cast<var *>(from)) {
-			if (((var *)from)->defined()) ff->set(((var *)from)->get_name().c_str(), this);
+			ff->set(((var *)from)->get_name().c_str(), this);
 			return true;
 		}
 		if (dynamic_cast<list *>(from)) {
 			value * _from = (list *)from;
 			stack_container<value *>::iterator _from_it = ((list *)_from)->val.begin();
+			string::iterator _from_it_s = ((list *)_from)->chars.begin();
 			value * _to = this;
 			stack_container<value *>::iterator _to_it = ((list *)_to)->val.begin();
+			string::iterator _to_it_s = ((list *)_to)->chars.begin();
 
 			while (_from && _to) {
-				while (dynamic_cast<list *>(_from) && _from_it == ((list *)_from)->val.end()) {
-					_from = ((list *)_from)->tag;
-					if (dynamic_cast<list *>(_from)) _from_it = ((list *)_from)->val.begin();
-				}
-				while (dynamic_cast<list *>(_to) && _to_it == ((list *)_to)->val.end()) {
-					_to = ((list *)_to)->tag;
-					if (dynamic_cast<list *>(_to)) _to_it = ((list *)_to)->val.begin();
-				}
+				bool advanced = false;
+				if (dynamic_cast<list *>(_from))
+					while (dynamic_cast<list *>(_from) && (
+						((list *)_from)->is_of_chars && _from_it_s == ((list *)_from)->chars.end() ||
+						!((list *)_from)->is_of_chars && _from_it == ((list *)_from)->val.end()
+							)) {
+						_from = ((list *)_from)->tag;
+						if (dynamic_cast<list *>(_from)) {
+							_from_it_s = ((list *)_from)->chars.begin();
+							_from_it = ((list *)_from)->val.begin();
+						}
+						advanced = true;
+					}
+				if (dynamic_cast<list *>(_to))
+					while (dynamic_cast<list *>(_to) && (
+						((list *)_to)->is_of_chars && _to_it_s == ((list *)_to)->chars.end() ||
+						!((list *)_to)->is_of_chars && _to_it == ((list *)_to)->val.end()
+						)) {
+							_to = ((list *)_to)->tag;
+							if (dynamic_cast<list *>(_to)) {
+								_to_it_s = ((list *)_to)->chars.begin();
+								_to_it = ((list *)_to)->val.begin();
+							}
+							advanced = true;
+						}
 				if (dynamic_cast<any *>(_from) || dynamic_cast<any *>(_to))
 					return true;
 				if (dynamic_cast<var *>(_from))
 					if (dynamic_cast<list *>(_to))
-						return _from->unify(ff, ((list *)_to)->from(ff, _to_it));
+						if (((list *)_to)->of_chars())
+							return _from->unify(ff, ((list *)_to)->from(ff, _to_it_s));
+						else
+							return _from->unify(ff, ((list *)_to)->from(ff, _to_it));
 					else if (_to)
 						return _from->unify(ff, _to);
 					else
 						return _from->unify(ff, new ::list(stack_container<value *>(), NULL));
 				if (dynamic_cast<var *>(_to))
 					if (dynamic_cast<list *>(_from))
-						return _to->unify(ff, ((list *)_from)->from(ff, _from_it));
+						if (((list *)_from)->of_chars())
+							return _to->unify(ff, ((list *)_from)->from(ff, _from_it_s));
+						else
+							return _to->unify(ff, ((list *)_from)->from(ff, _from_it));
 					else if (_from)
 						return _to->unify(ff, _from);
 					else
 						return _to->unify(ff, new ::list(stack_container<value *>(), NULL));
-				if (dynamic_cast<list *>(_from) && dynamic_cast<list *>(_to))
-					if (!(*_to_it++)->unify(ff, *_from_it++))
-						return false;
+				if (dynamic_cast<list *>(_from) && dynamic_cast<list *>(_to)) {
+					if (((list *)_from)->of_chars() && ((list *)_to)->of_chars())
+						if ((*_to_it_s++)!=(*_from_it_s++))
+							return false;
+						else
+							advanced = true;
+					else if (((list *)_from)->of_chars() != ((list *)_to)->of_chars()) {
+						if (((list *)_from)->of_chars()) {
+							term * fr = new term(string(1, *_from_it_s++));
+							if (!(*_to_it++)->unify(ff, fr)) {
+								fr->free();
+								return false;
+							} else
+								advanced = true;
+							fr->free();
+						} else {
+							term * t = new term(string(1, *_to_it_s++));
+							if (!(*_from_it++)->unify(ff, t)) {
+								t->free();
+								return false;
+							}
+							else
+								advanced = true;
+							t->free();
+						}
+					} else
+						if (!(*_to_it++)->unify(ff, *_from_it++))
+							return false;
+						else
+							advanced = true;
+				}
+				if (!advanced)
+					return _to->unify(ff, _from);
 			}
 
 			return !_from && !_to;
@@ -1508,9 +1323,10 @@ public:
 			return false;
 	}
 	virtual bool defined() {
-		for (value * v : val)
-			if (!v->defined())
-				return false;
+		if (!is_of_chars)
+			for (value * v : val)
+				if (!v->defined())
+					return false;
 		if (tag)
 			return tag->defined();
 		return true;
@@ -1518,8 +1334,12 @@ public:
 
 	virtual string make_str() {
 		string result;
-		for (value * v : val)
-			result += v->make_str();
+		if (is_of_chars) {
+			result = chars;
+		}
+		else
+			for (value * v : val)
+				result += v->make_str();
 		if (tag)
 			result += tag->make_str();
 		return result;
@@ -1531,12 +1351,20 @@ public:
 		int k = 0;
 
 		if (!simple) result += "[";
-		for (value * v : val) {
-			result += v->to_str(false);
-			k++;
-			if (k < val.size() || tag && !(dynamic_cast<list *>(tag) && dynamic_cast<list *>(tag)->size() == 0))
-				result += ",";
-		}
+		if (is_of_chars) {
+			for (char s : chars) {
+				result += s;
+				k++;
+				if (k < chars.size() || tag && !(dynamic_cast<list *>(tag) && dynamic_cast<list *>(tag)->size() == 0))
+					result += ",";
+			}
+		} else
+			for (value * v : val) {
+				result += v->to_str(false);
+				k++;
+				if (k < val.size() || tag && !(dynamic_cast<list *>(tag) && dynamic_cast<list *>(tag)->size() == 0))
+					result += ",";
+			}
 		if (tag) {
 			result += tag->to_str(true);
 		}
@@ -1545,6 +1373,131 @@ public:
 		return result;
 	}
 };
+
+generated_vars * predicate_item_user::generate_variants(frame_item * f, vector<value *> * & positional_vals) {
+	generated_vars * result = new generated_vars();
+	if (user_p)
+		for (int i = 0; i < user_p->num_clauses(); i++) {
+			frame_item * r = f->copy();
+			result->push_back(r);
+		}
+	else {
+		string iid = id;
+		term * dummy = NULL;
+		if (id.length() > 0 && id[0] >= 'A' && id[0] <= 'Z') {
+			dummy = dynamic_cast<term *>(f->get(id.c_str()));
+			if (dummy) {
+				dummy = dynamic_cast<term *>(dummy->copy(f));
+				iid = dummy->get_name();
+			}
+		}
+		else {
+			dummy = new term(id);
+			for (int j = 0; j < positional_vals->size(); j++) {
+				dummy->add_arg(f, positional_vals->at(j));
+			}
+		}
+		if (dummy && prolog->DB.find(iid) != prolog->DB.end()) {
+			vector<term *> * terms = prolog->DB[iid];
+			for (int i = 0; i < terms->size(); i++) {
+				frame_item * ff = f->copy();
+				term * _dummy = (term *)dummy->copy(ff);
+				if (_dummy->unify(ff, terms->at(i)))
+					result->push_back(ff);
+				else
+					delete ff;
+				_dummy->free();
+			}
+			dummy->free();
+		}
+		else {
+			std::cout << "Predicate [" << id << "] is neither standard nor dynamic!" << endl;
+			exit(500);
+		}
+
+		if (result && once && result->size() > 1) {
+			for (int i = 1; i < result->size(); i++)
+				delete result->at(i);
+			result->resize(1);
+		}
+
+		if (result && result->size() == 0) {
+			delete result;
+			result = NULL;
+		}
+	}
+
+	return result;
+}
+
+bool predicate_item_user::processing(bool line_neg, int variant, generated_vars * variants, vector<value *> ** positional_vals, frame_item * up_f) {
+	frame_item * f = new frame_item();
+	predicate_item * next = get_next(variant);
+	/**/
+	if (variant == 0) {
+		prolog->PARENT_CALLS.push(this);
+		prolog->PARENT_CALL_VARIANT.push(0);
+		prolog->CLAUSES.push(get_parent());
+		prolog->CALLS.push(next);
+		prolog->FRAMES.push(up_f->copy());
+		prolog->NEGS.push(line_neg);
+		prolog->_FLAGS.push((is_once() ? once_flag : 0) + (is_call() ? call_flag : 0));
+	}
+
+	prolog->PARENT_CALL_VARIANT.pop();
+	prolog->PARENT_CALL_VARIANT.push(variant);
+
+	if (prolog->retrieve(f, user_p->get_clause(variant), *positional_vals, true)) {
+		bool yes = user_p->get_clause(variant)->num_items() == 0;
+
+		if (yes) {
+			vector<value *> * v = NULL;
+			yes = prolog->process(neg, user_p->get_clause(variant), NULL, f, &v);
+		}
+		else {
+			predicate_item * first = user_p->get_clause(variant)->get_item(0);
+			vector<value *> * first_args = prolog->accept(f, first);
+			yes = prolog->process(neg, user_p->get_clause(variant), first, f, &first_args);
+			if (first_args) {
+				for (int j = 0; j < first_args->size(); j++)
+					first_args->at(j)->free();
+				delete first_args;
+			}
+		}
+
+		if ((yes || (!variants || !variants->has_variant(variant + 1))) && prolog->PARENT_CALLS.size() > 0 && prolog->PARENT_CALLS.top() == this) {
+			prolog->CALLS.pop();
+			prolog->PARENT_CALLS.pop();
+			prolog->PARENT_CALL_VARIANT.pop();
+			prolog->CLAUSES.pop();
+			prolog->FRAMES.pop();
+			prolog->NEGS.pop();
+			prolog->_FLAGS.pop();
+		}
+
+		if (yes && prolog->PARENT_CALLS.size() == 0)
+			up_f->sync(f);
+
+		delete f;
+
+		return yes;
+	}
+	else {
+		if ((!variants || !variants->has_variant(variant + 1)) && prolog->PARENT_CALLS.size() > 0 && prolog->PARENT_CALLS.top() == this) {
+			prolog->CALLS.pop();
+			prolog->PARENT_CALLS.pop();
+			prolog->PARENT_CALL_VARIANT.pop();
+			prolog->CLAUSES.pop();
+			prolog->FRAMES.pop();
+			prolog->NEGS.pop();
+			prolog->_FLAGS.pop();
+		}
+
+		delete f;
+
+		return false;
+	}
+}
 
 double interpreter::evaluate(frame_item * ff, const string & expression, int & p) {
 	string ops = "(+-*/";
@@ -1717,164 +1670,6 @@ double interpreter::evaluate(frame_item * ff, const string & expression, int & p
 
 	return vals.top();
 }
-
-class predicate {
-	friend predicate_item;
-	friend clause;
-private:
-	string name;
-	vector<clause *> clauses;
-public:
-	predicate(const string & _name) : name(_name) { }
-	~predicate();
-
-	void bind();
-
-	void add_clause(clause * c) {
-		clauses.push_back(c);
-	}
-
-	virtual int num_clauses() { return clauses.size(); }
-	virtual clause * get_clause(int i) { return clauses[i]; }
-};
-
-class clause {
-	friend predicate_item;
-private:
-	predicate * parent;
-	std::list<string> args;
-	std::list<value *> _args;
-	vector<predicate_item *> items;
-public:
-	clause(predicate * pp) : parent(pp) { }
-	~clause();
-
-	virtual void bind();
-
-	predicate * get_predicate() { return parent; }
-
-	const std::list<string> * get_args() {
-		return &args;
-	}
-
-	const std::list<value *> * _get_args() {
-		return &_args;
-	}
-
-	void push_cashed_arg(value * v) {
-		v->use();
-		_args.push_back(v);
-	}
-
-	void set_args(const std::list<string> & other_args) {
-		args = other_args;
-	}
-
-	void add_item(predicate_item * p) {
-		items.push_back(p);
-	}
-
-	void add_arg(const string & a) {
-		args.push_back(a);
-	}
-
-	virtual int num_items() { return items.size(); }
-	virtual predicate_item * get_item(int i) { return items[i]; }
-};
-
-void predicate::bind() {
-	for (clause * c : clauses)
-		c->bind();
-}
-
-class generated_vars : public vector<frame_item *> {
-public:
-	generated_vars() : vector<frame_item *>() { }
-	generated_vars(int n, frame_item * filler) : vector<frame_item *>(n, filler) { }
-
-	virtual bool has_variant(int i) { return i < size(); }
-	virtual bool had_variants() { return size() != 0; }
-
-	virtual void trunc_from(int k) {
-		delete_from(k);
-		this->resize(k);
-	}
-
-	virtual frame_item * get_next_variant(int i) { return at(i); }
-
-	virtual void delete_from(int i) {
-		for (int j = i; j < size(); j++)
-			delete at(j);
-	}
-};
-
-class predicate_item {
-protected:
-	int self_number;
-	clause * parent;
-	std::list<string> args;
-	std::list<value *> _args;
-
-	interpreter * prolog;
-
-	bool neg;
-	bool once;
-	bool call;
-public:
-	predicate_item(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : neg(_neg), once(_once), call(_call), self_number(num), parent(c), prolog(_prolog) { }
-	~predicate_item() {
-		for (value * v : _args)
-			v->free();
-	}
-
-	virtual void bind() { }
-
-	virtual const string get_id() = 0;
-
-	bool is_negated() { return neg; }
-	bool is_once() { return once; }
-	bool is_call() { return call; }
-
-	void make_once() { once = true; }
-	void clear_negated() { neg = false; }
-
-	const std::list<value *> * _get_args() {
-		return &_args;
-	}
-
-	void push_cashed_arg(value * v) {
-		v->use();
-		_args.push_back(v);
-	}
-
-	void add_arg(const string & a) {
-		args.push_back(a);
-	}
-
-	virtual predicate_item * get_next(int variant) {
-		if (!is_last()) {
-			return parent->items[self_number + 1];
-		} else
-			return NULL;
-	}
-
-	virtual frame_item * get_next_variant(frame_item * f, int & internal_variant, vector<value *> * positional_vals) { return NULL; }
-
-	const std::list<string> * get_args() {
-		return &args;
-	}
-
-	clause * get_parent() { return parent; }
-
-	bool is_first() { return self_number == 0; }
-	bool is_last() { return !parent || self_number == parent->items.size() - 1; }
-
-	virtual generated_vars * generate_variants(frame_item * f, vector<value *> * & positional_vals) = 0;
-
-	virtual bool execute(frame_item * f) {
-		return true;
-	}
-};
 
 class lazy_generated_vars : public generated_vars {
 	predicate_item * p;
@@ -2276,16 +2071,16 @@ public:
 			value * t1 = dynamic_cast<value *>(positional_vals->at(0));
 			::list * L2 = dynamic_cast<::list *>(positional_vals->at(1));
 
-			if (!L2 || L2->size() == 0 || !dynamic_cast<term *>(L2->get_nth(1))) {
+			if (!L2 || L2->size() == 0 || !dynamic_cast<term *>(L2->get_nth(1, false))) {
 				std::cout << "=..(term,[term_id,arg1,...,argN]) has incorrect parameters!" << endl;
 				exit(-3);
 			}
 
 			frame_item * r = f->copy();
 
-			term * TT = new term(dynamic_cast<term *>(L2->get_nth(1))->get_name());
+			term * TT = new term(dynamic_cast<term *>(L2->get_nth(1, false))->get_name());
 			for (int i = 2; i <= L2->size(); i++)
-				TT->add_arg(r, L2->get_nth(i)->copy(r));
+				TT->add_arg(r, L2->get_nth(i, false)->copy(r));
 
 			if (t1->unify(r, TT)) {
 				result->push_back(r);
@@ -2929,44 +2724,50 @@ public:
 			value * L2 = dynamic_cast<::value *>(positional_vals->at(1));
 			::list * L3 = dynamic_cast<::list *>(positional_vals->at(2));
 
-			if (L1 && L2 && L3)
-				for (; !result && internal_variant <= L3->size(); internal_variant++) {
-					value * K1 = NULL;
-					value * K2 = NULL;
-					L3->split(f, internal_variant, K1, K2);
+			if (L1 && L2 && L3 && !result && L1->size() <= L3->size() && internal_variant <= L1->size()) {
+				internal_variant = L1->size();
+				value * K1 = NULL;
+				value * K2 = NULL;
+				L3->split(f, internal_variant, K1, K2);
 
-					frame_item * r = f->copy();
+				frame_item * r = f->copy();
 
-					if (L1->unify(r, K1) && L2->unify(r, K2))
-						result = r;
-					else {
-						delete r;
-					}
-					K1->free();
-					K2->free();
+				if (L1->unify(r, K1) && L2->unify(r, K2))
+					result = r;
+				else {
+					delete r;
+					internal_variant = L3->size();
 				}
+				K1->free();
+				K2->free();
+			} else
+				internal_variant = L3->size();
+			internal_variant++;
 		}
 		if (!d1 && d2 && d3) {
 			value * L1 = dynamic_cast<::value *>(positional_vals->at(0));
 			::list * L2 = dynamic_cast<::list *>(positional_vals->at(1));
 			::list * L3 = dynamic_cast<::list *>(positional_vals->at(2));
 
-			if (L1 && L2 && L3)
-				for (; !result && internal_variant <= L3->size(); internal_variant++) {
-					value * K1;
-					value * K2;
-					L3->split(f, internal_variant, K1, K2);
+			if (L1 && L2 && L3 && !result && L2->size() <= L3->size() && internal_variant <= L3->size()-L2->size()) {
+				internal_variant = L3->size() - L2->size();
+				value * K1;
+				value * K2;
+				L3->split(f, internal_variant, K1, K2);
 
-					frame_item * r = f->copy();
+				frame_item * r = f->copy();
 
-					if (L1->unify(r, K1) && L2->unify(r, K2))
-						result = r;
-					else {
-						delete r;
-					}
-					K1->free();
-					K2->free();
+				if (L1->unify(r, K1) && L2->unify(r, K2))
+					result = r;
+				else {
+					delete r;
+					internal_variant = L3->size();
 				}
+				K1->free();
+				K2->free();
+			} else
+				internal_variant = L3->size();
+			internal_variant++;
 		}
 		if (!d1 && !d2 && d3 || !d1 && !d2 && !d3) {
 			value * L1 = dynamic_cast<::value *>(positional_vals->at(0));
@@ -3006,6 +2807,88 @@ public:
 		int internal_ptr = 0;
 		frame_item * first = get_next_variant(f, internal_ptr, positional_vals);
 		
+		if (first)
+			return new lazy_generated_vars(f, this, positional_vals, first, internal_ptr, once ? 1 : 0xFFFFFFFF);
+		else
+			return NULL;
+	}
+};
+
+class predicate_item_sublist : public predicate_item {
+	bool d1, d2;
+public:
+	predicate_item_sublist(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) { }
+
+	virtual const string get_id() { return "sublist"; }
+
+	virtual frame_item * get_next_variant(frame_item * f, int & internal_variant, vector<value *> * positional_vals) {
+		frame_item * result = NULL;
+
+		if (d1 && d2 && internal_variant == 0) {
+			::list * L1 = dynamic_cast<::list *>(positional_vals->at(0));
+			::list * L2 = dynamic_cast<::list *>(positional_vals->at(1));
+
+			if (L1 && L2) {
+				stack_values LL1;
+				L1->get(f, &LL1);
+				int p = 0;
+				frame_item * r = f->copy();
+				L2->iterate([&](value * v) {
+					if (p < LL1.size()) {
+						if (LL1[p]->unify(r, v))
+							p++;
+					}
+				});
+				if (p == LL1.size())
+					result = r;
+				else {
+					delete r;
+				}
+				LL1.free();
+			}
+			internal_variant++;
+		}
+		if (!d1 && d2) {
+			value * V1 = dynamic_cast<::value *>(positional_vals->at(0));
+			::list * L2 = dynamic_cast<::list *>(positional_vals->at(1));
+
+			if (V1 && L2) {
+				int N = 1 << L2->size();
+				for (; !result && internal_variant < N; internal_variant++) {
+					stack_values SUBSET;
+					int mask = 1;
+					for (int i = 0; i < L2->size() && mask; i++, mask <<= 1) {
+						if (internal_variant & mask)
+							SUBSET.push_back(L2->get_nth(i+1, true));
+					}
+					::list * K = new ::list(SUBSET, NULL);
+
+					frame_item * r = f->copy();
+
+					if (V1->unify(r, K))
+						result = r;
+					else {
+						delete r;
+					}
+					K->free();
+				}
+			}
+		}
+
+		return result;
+	}
+
+	virtual generated_vars * generate_variants(frame_item * f, vector<value *> * & positional_vals) {
+		if (positional_vals->size() != 2) {
+			std::cout << "sublist(A,B) incorrect call!" << endl;
+			exit(-3);
+		}
+		d1 = positional_vals->at(0)->defined();
+		d2 = positional_vals->at(1)->defined();
+
+		int internal_ptr = 0;
+		frame_item * first = get_next_variant(f, internal_ptr, positional_vals);
+
 		if (first)
 			return new lazy_generated_vars(f, this, positional_vals, first, internal_ptr, once ? 1 : 0xFFFFFFFF);
 		else
@@ -3058,9 +2941,11 @@ public:
 			value * L2 = dynamic_cast<::value *>(positional_vals->at(1));
 			::term * L3 = dynamic_cast<::term *>(positional_vals->at(2));
 
+			string LL1S = L1->make_str();
 			string LL3S = L3->make_str();
 
-			for (; !result && internal_variant <= LL3S.length(); internal_variant++) {
+			if (L1 && L2 && L3 && !result && LL1S.size() <= LL3S.size() && internal_variant <= LL1S.size()) {
+				internal_variant = LL1S.size();
 				value * K1 = new term(LL3S.substr(0, internal_variant));
 				value * K2 = new term(LL3S.substr(internal_variant, LL3S.length() - internal_variant));
 
@@ -3070,19 +2955,25 @@ public:
 					result = r;
 				else {
 					delete r;
+					internal_variant = LL3S.size();
 				}
 				K1->free();
 				K2->free();
 			}
+			else
+				internal_variant = LL3S.size();
+			internal_variant++;
 		}
 		if (!d1 && d2 && d3) {
 			value * L1 = dynamic_cast<::value *>(positional_vals->at(0));
 			::term * L2 = dynamic_cast<::term *>(positional_vals->at(1));
 			::term * L3 = dynamic_cast<::term *>(positional_vals->at(2));
 
+			string LL2S = L2->make_str();
 			string LL3S = L3->make_str();
 
-			for (; !result && internal_variant <= LL3S.length(); internal_variant++) {
+			if (L1 && L2 && L3 && !result && LL2S.size() <= LL3S.size() && internal_variant <= LL3S.size() - LL2S.size()) {
+				internal_variant = LL3S.size() - LL2S.size();
 				value * K1 = new term(LL3S.substr(0, internal_variant));
 				value * K2 = new term(LL3S.substr(internal_variant, LL3S.length() - internal_variant));
 
@@ -3092,10 +2983,13 @@ public:
 					result = r;
 				else {
 					delete r;
+					internal_variant = LL3S.size();
 				}
 				K1->free();
 				K2->free();
-			}
+			} else
+				internal_variant = LL3S.size();
+			internal_variant++;
 		}
 		if (!d1 && !d2 && d3) {
 			value * L1 = dynamic_cast<::value *>(positional_vals->at(0));
@@ -3146,6 +3040,94 @@ public:
 	}
 };
 
+class predicate_item_delete : public predicate_item {
+public:
+	predicate_item_delete(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) { }
+
+	virtual const string get_id() { return "delete"; }
+
+	virtual generated_vars * generate_variants(frame_item * f, vector<value *> * & positional_vals) {
+		if (positional_vals->size() != 3) {
+			std::cout << "delete(A,B,C) incorrect call!" << endl;
+			exit(-3);
+		}
+		bool d1 = positional_vals->at(0)->defined();
+		bool d2 = positional_vals->at(1)->defined();
+		bool d3 = positional_vals->at(2)->defined();
+		if (!d1 && !d2 && !d3) {
+			std::cout << "delete(A,B,C) indeterminated!" << endl;
+			exit(-3);
+		}
+
+		generated_vars * result = new generated_vars();
+		if (d1 && d2 && d3) {
+			::list * L1 = dynamic_cast<::list *>(positional_vals->at(0));
+			value * V2 = positional_vals->at(1);
+			::list * L3 = dynamic_cast<::list *>(positional_vals->at(2));
+
+			stack_values LL1;
+			frame_item * r = f->copy();
+			L1->iterate([&](value * v) {
+				if (!V2->unify(r, v))
+					LL1.push_back(v->copy(r));
+			});
+			::list * LL3 = new ::list(LL1, NULL);
+
+			if (L3->unify(r, LL3))
+				result->push_back(r);
+			else {
+				delete result;
+				result = NULL;
+				delete r;
+			}
+			LL3->free();
+		}
+		if (d1 && d2 && !d3) {
+			::list * L1 = dynamic_cast<::list *>(positional_vals->at(0));
+			value * V2 = positional_vals->at(1);
+			value * V3 = positional_vals->at(2);
+
+			stack_values LL1;
+			frame_item * r = f->copy();
+			L1->iterate([&](value * v) {
+				if (!V2->unify(r, v))
+					LL1.push_back(v->copy(r));
+			});
+			::list * LL3 = new ::list(LL1, NULL);
+
+			if (V3->unify(r, LL3))
+				result->push_back(r);
+			else {
+				delete result;
+				result = NULL;
+				delete r;
+			}
+			LL3->free();
+		}
+		if (!d1 && d3 || d1 && !d2 && !d3) {
+			value * A1 = dynamic_cast<::value *>(positional_vals->at(0));
+			value * A2 = dynamic_cast<::value *>(positional_vals->at(1));
+			::list * L3 = dynamic_cast<::list *>(positional_vals->at(2));
+
+			frame_item * r = f->copy();
+
+			if (A1->unify(r, L3))
+				result->push_back(r);
+			else {
+				delete result;
+				result = NULL;
+				delete r;
+			}
+		}
+		if (!d1 && d2 && !d3 || d1 && !d2 && d3) {
+			delete result;
+			result = NULL;
+		}
+
+		return result;
+	}
+};
+
 class predicate_item_atom_chars : public predicate_item {
 public:
 	predicate_item_atom_chars(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) { }
@@ -3187,20 +3169,14 @@ public:
 
 			frame_item * r = f->copy();
 
-			::list * L = new ::list(stack_container<value *>(), NULL);
+			::list * L = NULL;
 
 			if (L1 && L1->size() == 0) {
-				char buf1[2] = "[";
-				char buf2[2] = "]";
-				L->add(new ::term(buf1));
-				L->add(new ::term(buf2));
+				L = new ::list("[]", NULL);
 			}
 			else {
 				string S = A1->make_str();
-				for (char c : S) {
-					char buf[2] = { c, 0 };
-					L->add(new ::term(buf));
-				}
+				L = new ::list(S, NULL);
 			}
 
 			if (L2->unify(r, L))
@@ -3418,6 +3394,40 @@ public:
 	}
 };
 
+class predicate_item_change_directory : public predicate_item {
+public:
+	predicate_item_change_directory(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) { }
+
+	virtual const string get_id() { return "change_directory"; }
+
+	virtual generated_vars * generate_variants(frame_item * f, vector<value *> * & positional_vals) {
+		if (positional_vals->size() != 1) {
+			std::cout << "change_directory(Dir) incorrect call!" << endl;
+			exit(-3);
+		}
+		bool d1 = positional_vals->at(0)->defined();
+		if (!d1) {
+			std::cout << "change_directory(Dir) indeterminated!" << endl;
+			exit(-3);
+		}
+
+		generated_vars * result = new generated_vars();
+		frame_item * r = f->copy();
+		result->push_back(r);
+
+		term * A = dynamic_cast<::term *>(positional_vals->at(0));
+		if (A) {
+			current_path(A->get_name());
+		} else {
+			delete r;
+			delete result;
+			result = NULL;
+		}
+
+		return result;
+	}
+};
+
 class predicate_item_open_url : public predicate_item {
 public:
 	predicate_item_open_url(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) { }
@@ -3620,6 +3630,61 @@ public:
 	}
 };
 
+class predicate_item_reverse : public predicate_item {
+public:
+	predicate_item_reverse(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) { }
+
+	virtual const string get_id() { return "reverse"; }
+
+	virtual generated_vars * generate_variants(frame_item * f, vector<value *> * & positional_vals) {
+		if (positional_vals->size() != 2) {
+			std::cout << "reverse(A,B) incorrect call!" << endl;
+			exit(-3);
+		}
+		bool d1 = positional_vals->at(0)->defined();
+		bool d2 = positional_vals->at(1)->defined();
+		if (!d1 && !d2) {
+			std::cout << "reverse(A,B) indeterminated!" << endl;
+			exit(-3);
+		}
+
+		generated_vars * result = new generated_vars();
+		::list * L1 = dynamic_cast<::list *>(positional_vals->at(0));
+		::value * V1 = dynamic_cast<::value *>(positional_vals->at(0));
+		::list * L2 = dynamic_cast<::list *>(positional_vals->at(1));
+		::value * V2 = dynamic_cast<::value *>(positional_vals->at(1));
+
+		if (d1 && !L1 || d2 && !L2) {
+			std::cout << "reverse(A,B) : A and B are not lists!" << endl;
+			exit(-3);
+		}
+
+		if (d2) {
+			swap(d1, d2);
+			swap(L1, L2);
+			swap(V1, V2);
+		}
+
+		frame_item * r = f->copy();
+		stack_container<value *> REV1;
+		L1->get(r, &REV1);
+		reverse(REV1.begin(), REV1.end());
+
+		::list * R1 = new ::list(REV1, NULL);
+
+		if (V2->unify(r, R1))
+			result->push_back(r);
+		else {
+			delete result;
+			result = NULL;
+			delete r;
+		}
+		R1->free();
+
+		return result;
+	}
+};
+
 class predicate_item_member : public predicate_item {
 	bool d1;
 	::list * L2;
@@ -3636,7 +3701,7 @@ public:
 		for (; !result && internal_variant < L2->size(); internal_variant++) {
 			frame_item * r = f->copy();
 
-			if (L2->get_nth(internal_variant + 1)->unify(r, V1))
+			if (L2->get_nth(internal_variant + 1, false)->unify(r, V1))
 				result = r;
 			else
 				delete r;
@@ -3819,7 +3884,7 @@ public:
 			delete r;
 		}
 		else { // Unify nth-element
-			value * V = L2->get_nth(NUM1->get_value());
+			value * V = L2->get_nth(NUM1->get_value(), true);
 			if (V && V3->unify(r, V))
 				result->push_back(r);
 			else {
@@ -4843,161 +4908,13 @@ public:
 	}
 };
 
-class predicate_item_user : public predicate_item {
-private:
-	string id;
-	predicate * user_p;
-public:
-	predicate_item_user(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog, const string & _name) : predicate_item(_neg, _once, _call, num, c, _prolog), id(_name) {
-		user_p = NULL;
-	}
-
-	virtual void bind() {
-		if (prolog->PREDICATES.find(id) == prolog->PREDICATES.end())
-			user_p = NULL;
-		else
-			user_p = prolog->PREDICATES[id];
-	}
-
-	bool is_dynamic() { return user_p == NULL; }
-
-	predicate * get_user_predicate() { return user_p; }
-
-	virtual const string get_id() { return id; }
-
-	virtual generated_vars * generate_variants(frame_item * f, vector<value *> * & positional_vals) {
-		generated_vars * result = new generated_vars();
-		if (user_p)
-			for (int i = 0; i < user_p->num_clauses(); i++) {
-				frame_item * r = f->copy();
-				result->push_back(r);
-			}
-		else {
-			string iid = id;
-			term * dummy = NULL;
-			if (id.length() > 0 && id[0] >= 'A' && id[0] <= 'Z') {
-				dummy = dynamic_cast<term *>(f->get(id.c_str()));
-				if (dummy) {
-					dummy = dynamic_cast<term *>(dummy->copy(f));
-					iid = dummy->get_name();
-				}
-			}
-			else {
-				dummy = new term(id);
-				for (int j = 0; j < positional_vals->size(); j++) {
-					dummy->add_arg(f, positional_vals->at(j));
-				}
-			}
-			if (dummy && prolog->DB.find(iid) != prolog->DB.end()) {
-				vector<term *> * terms = prolog->DB[iid];
-				for (int i = 0; i < terms->size(); i++) {
-					frame_item * ff = f->copy();
-					term * _dummy = (term *)dummy->copy(ff);
-					if (_dummy->unify(ff, terms->at(i)))
-						result->push_back(ff);
-					else
-						delete ff;
-					_dummy->free();
-				}
-				dummy->free();
-			}
-			else {
-				std::cout << "Predicate [" << id << "] is neither standard nor dynamic!" << endl;
-				exit(500);
-			}
-
-			if (result && once && result->size() > 1) {
-				for (int i = 1; i < result->size(); i++)
-					delete result->at(i);
-				result->resize(1);
-			}
-
-			if (result && result->size() == 0) {
-				delete result;
-				result = NULL;
-			}
-		}
-
-		return result;
-	}
-
-	virtual bool processing(bool line_neg, int variant, generated_vars * variants, vector<value *> * & positional_vals, frame_item * up_f) {
-		frame_item * f = new frame_item();
-		predicate_item * next = get_next(variant);
-		/**/
-		if (built_flag){
-			std::cout << this->get_id() << "[" << variant << "]" << endl;
-		}
-		if (variant == 0) {
-			prolog->PARENT_CALLS.push(this);
-			prolog->PARENT_CALL_VARIANT.push(0);
-			prolog->CLAUSES.push(get_parent());
-			prolog->CALLS.push(next);
-			prolog->FRAMES.push(up_f->copy());
-			prolog->NEGS.push(line_neg);
-			prolog->_FLAGS.push((is_once() ? once_flag : 0) + (is_call() ? call_flag : 0));
-		}
-
-		prolog->PARENT_CALL_VARIANT.pop();
-		prolog->PARENT_CALL_VARIANT.push(variant);
-
-		if (prolog->retrieve(f, user_p->get_clause(variant), positional_vals, true)) {
-			bool yes = user_p->get_clause(variant)->num_items() == 0;
-
-			if (yes) {
-				vector<value *> * v = NULL;
-				yes = prolog->process(neg, user_p->get_clause(variant), NULL, f, v);
-			}
-			else {
-				predicate_item * first = user_p->get_clause(variant)->get_item(0);
-				vector<value *> * first_args = prolog->accept(f, first);
-				yes = prolog->process(neg, user_p->get_clause(variant), first, f, first_args);
-				for (int j = 0; j < first_args->size(); j++)
-					first_args->at(j)->free();
-				delete first_args;
-			}
-
-			if ((yes || (!variants || !variants->has_variant(variant+1))) && prolog->PARENT_CALLS.size() > 0 && prolog->PARENT_CALLS.top() == this) {
-				prolog->CALLS.pop();
-				prolog->PARENT_CALLS.pop();
-				prolog->PARENT_CALL_VARIANT.pop();
-				prolog->CLAUSES.pop();
-				prolog->FRAMES.pop();
-				prolog->NEGS.pop();
-				prolog->_FLAGS.pop();
-			}
-
-			if (yes && prolog->PARENT_CALLS.size() == 0)
-				up_f->sync(f);
-
-			delete f;
-
-			return yes;
-		}
-		else {
-			if ((!variants || !variants->has_variant(variant + 1)) && prolog->PARENT_CALLS.size() > 0 && prolog->PARENT_CALLS.top() == this) {
-				prolog->CALLS.pop();
-				prolog->PARENT_CALLS.pop();
-				prolog->PARENT_CALL_VARIANT.pop();
-				prolog->CLAUSES.pop();
-				prolog->FRAMES.pop();
-				prolog->NEGS.pop();
-				prolog->_FLAGS.pop();
-			}
-
-			delete f;
-
-			return false;
-		}
-	}
-};
-
 void interpreter::block_process(bool clear_flag, bool cut_flag, predicate_item * frontier) {
 	std::list<int>::iterator itf = FLAGS.end();
 	bool passed_frontier = false;
 	int nn = TRACE.size() - 1;
 	while (nn >= 0) {
 		generated_vars * T = TRACE[nn];
+		vector<value *> ** A = TRACEARGS[nn];
 		predicate_item * WHO = TRACERS[nn];
 		int n = ptrTRACE[nn];
 		int flags = *(--itf);
@@ -5009,8 +4926,14 @@ void interpreter::block_process(bool clear_flag, bool cut_flag, predicate_item *
 			level == PARENT_CALLS.size() - 1)
 			break;
 
-		if (cut_flag && T) {
-			T->trunc_from(n + 1);
+		if (cut_flag) {
+			if (T) T->trunc_from(n + 1);
+			if (A && *A) {
+				for (int j = 0; j < (*A)->size(); j++)
+					(*A)->at(j)->free();
+				delete *A;
+				*A = NULL;
+			}
 		}
 
 		if ((flags & (call_flag | once_flag))) {
@@ -5373,41 +5296,39 @@ bool interpreter::retrieve(frame_item * ff, predicate_item * current, vector<val
 	return result;
 }
 
-bool interpreter::process(bool neg, clause * this_clause, predicate_item * p, frame_item * f, vector<value *> * & positional_vals) {
+bool interpreter::process(bool neg, clause * this_clause, predicate_item * p, frame_item * f, vector<value *> ** positional_vals) {
 	predicate_item_user * user = dynamic_cast<predicate_item_user *>(p);
 
-	generated_vars * variants = p ? p->generate_variants(f, positional_vals) : new generated_vars(1, f->copy());
-
+	generated_vars * variants = p ? p->generate_variants(f, *positional_vals) : new generated_vars(1, f->copy());
+	/*
+	if (p) {
+		cout << p->get_id() << "(";
+		if (positional_vals && *positional_vals)
+		for (int i = 0; i < (*positional_vals)->size(); i++) {
+			cout << (*positional_vals)->at(i)->make_str();
+			if (i < (*positional_vals)->size()-1) cout << ",";
+		}
+		cout << ")" << endl;
+	}
+	*/
 	bool neg_standard = !(user && !user->is_dynamic()) && p && p->is_negated();
 	int i = 0;
-	/**/
-	if (built_flag){
-		std::cout << "entering process: ";
-	}
 	if (variants || neg_standard) {
 		FLAGS.push_back((p && p->is_once() ? once_flag : 0) + (p && p->is_call() ? call_flag : 0));
 		LEVELS.push(PARENT_CALLS.size());
 		TRACE.push(variants);
+		TRACEARGS.push(positional_vals);
 		TRACERS.push(p);
 		for (i = 0; neg_standard || variants && variants->has_variant(i); i++) {
 			predicate_item * next = p ? p->get_next(i) : NULL;
 			frame_item * ff = variants ? variants->get_next_variant(i) : f->copy();
 			bool success = false;
 			ptrTRACE.push(i);
-			/**/
-			if (built_flag){
-				std::cout << (p ? p->get_id() : "END") << "[" << i << "]" << endl;
-				cin.get();
-			}
 			if (user && !user->is_dynamic()) {
 				if (!user->is_negated()) {
 					if (user->processing(neg, i, variants, positional_vals, ff)) {
-						/**/
-						if (built_flag){
-							std::cout << "true ret to " << (p ? p->get_id() : "END") << "[" << i << "]" << endl;
-							//cin.get();
-						}
 						TRACE.pop();
+						TRACEARGS.pop();
 						TRACERS.pop();
 						FLAGS.pop_back();
 						LEVELS.pop();
@@ -5423,15 +5344,11 @@ bool interpreter::process(bool neg, clause * this_clause, predicate_item * p, fr
 						return true;
 					}
 					else if (!variants->has_variant(i+1)) {
-						/**/
-						if (built_flag){
-							std::cout << "false ret to " << (p ? p->get_id() : "END") << "[" << i << "]" << endl;
-							//cin.get();
-						}
 						ptrTRACE.pop();
 						FLAGS.pop_back();
 						LEVELS.pop();
 						TRACE.pop();
+						TRACEARGS.pop();
 						TRACERS.pop();
 
 						delete variants;
@@ -5442,6 +5359,7 @@ bool interpreter::process(bool neg, clause * this_clause, predicate_item * p, fr
 				else {
 					if (user->processing(neg, i, variants, positional_vals, ff)) {
 						TRACE.pop();
+						TRACEARGS.pop();
 						TRACERS.pop();
 						FLAGS.pop_back();
 						LEVELS.pop();
@@ -5464,6 +5382,7 @@ bool interpreter::process(bool neg, clause * this_clause, predicate_item * p, fr
 				if (neg_standard) {
 					if (variants && variants->had_variants() && (!p || p->execute(ff))) {
 						TRACE.pop();
+						TRACEARGS.pop();
 						TRACERS.pop();
 						FLAGS.pop_back();
 						LEVELS.pop();
@@ -5502,18 +5421,21 @@ bool interpreter::process(bool neg, clause * this_clause, predicate_item * p, fr
 				if (!yes) {
 					vector<value *> * next_args = accept(ff, next);
 					if (next_args) {
-						yes = process(neg, this_clause, next, ff, next_args);
-						/**/
-						if (built_flag){
-							std::cout << (yes ? "true" : "false") << " ret to " << (p ? p->get_id() : "END") << "[" << i << "]" << endl;
-							//cin.get();
+						if (*positional_vals && !(neg_standard || variants && variants->has_variant(i + 1))) {
+							for (int j = 0; j < (*positional_vals)->size(); j++)
+								(*positional_vals)->at(j)->free();
+							delete (*positional_vals);
+							(*positional_vals) = NULL;
 						}
-
-						for (int j = 0; j < next_args->size(); j++)
-							next_args->at(j)->free();
-						delete next_args;
+						yes = process(neg, this_clause, next, ff, &next_args);
+						if (next_args) {
+							for (int j = 0; j < next_args->size(); j++)
+								next_args->at(j)->free();
+							delete next_args;
+						}
 						if (yes) {
 							TRACE.pop();
+							TRACEARGS.pop();
 							TRACERS.pop();
 							FLAGS.pop_back();
 							LEVELS.pop();
@@ -5577,6 +5499,7 @@ bool interpreter::process(bool neg, clause * this_clause, predicate_item * p, fr
 
 						if (neg) {
 							TRACE.pop();
+							TRACEARGS.pop();
 							TRACERS.pop();
 							FLAGS.pop_back();
 							LEVELS.pop();
@@ -5599,12 +5522,13 @@ bool interpreter::process(bool neg, clause * this_clause, predicate_item * p, fr
 						vector<value *> * next_args =
 							next_clause_call ? accept(_up_ff, next_clause_call) : new vector<value *>();
 						if (next_args) {
-							yes = process(next_neg, next_clause, next_clause_call, _up_ff, next_args);
-							/**/
-							if (built_flag){
-								std::cout << (yes ? "true" : "false") << " ret to " << (p ? p->get_id() : "END") << "[" << i << "]" << endl;
-								//cin.get();
+							if (*positional_vals && !(neg_standard || variants && variants->has_variant(i + 1))) {
+								for (int j = 0; j < (*positional_vals)->size(); j++)
+									(*positional_vals)->at(j)->free();
+								delete (*positional_vals);
+								(*positional_vals) = NULL;
 							}
+							yes = process(next_neg, next_clause, next_clause_call, _up_ff, &next_args);
 							if (!yes) {
 								PARENT_CALLS.push(dynamic_cast<predicate_item_user *>(parent_call));
 								PARENT_CALL_VARIANT.push(old_variant);
@@ -5614,11 +5538,14 @@ bool interpreter::process(bool neg, clause * this_clause, predicate_item * p, fr
 								NEGS.push(next_neg);
 								_FLAGS.push(_flags);
 							}
-							for (int j = 0; j < next_args->size(); j++)
-								next_args->at(j)->free();
-							delete next_args;
+							if (next_args) {
+								for (int j = 0; j < next_args->size(); j++)
+									next_args->at(j)->free();
+								delete next_args;
+							}
 							if (yes) {
 								TRACE.pop();
+								TRACEARGS.pop();
 								TRACERS.pop();
 								FLAGS.pop_back();
 								LEVELS.pop();
@@ -5638,6 +5565,7 @@ bool interpreter::process(bool neg, clause * this_clause, predicate_item * p, fr
 					}
 					else {
 						TRACE.pop();
+						TRACEARGS.pop();
 						TRACERS.pop();
 						FLAGS.pop_back();
 						LEVELS.pop();
@@ -5659,6 +5587,7 @@ bool interpreter::process(bool neg, clause * this_clause, predicate_item * p, fr
 		FLAGS.pop_back();
 		LEVELS.pop();
 		TRACE.pop();
+		TRACEARGS.pop();
 		TRACERS.pop();
 	}
 
@@ -5957,11 +5886,20 @@ void interpreter::parse_clause(vector<string> & renew, frame_item * ff, string &
 				else if (iid == "append") {
 					pi = new predicate_item_append(neg, once, call, num, cl, this);
 				}
+				else if (iid == "sublist") {
+					pi = new predicate_item_sublist(neg, once, call, num, cl, this);
+				}
+				else if (iid == "delete") {
+					pi = new predicate_item_delete(neg, once, call, num, cl, this);
+				}
 				else if (iid == "member") {
 					pi = new predicate_item_member(neg, once, call, num, cl, this);
 				}
 				else if (iid == "last") {
 					pi = new predicate_item_last(neg, once, call, num, cl, this);
+				}
+				else if (iid == "reverse") {
+					pi = new predicate_item_reverse(neg, once, call, num, cl, this);
 				}
 				else if (iid == "length") {
 					pi = new predicate_item_length(neg, once, call, num, cl, this);
@@ -6031,6 +5969,9 @@ void interpreter::parse_clause(vector<string> & renew, frame_item * ff, string &
 				}
 				else if (iid == "true") {
 					pi = new predicate_item_true(neg, once, call, num, cl, this);
+				}
+				else if (iid == "change_directory") {
+					pi = new predicate_item_change_directory(neg, once, call, num, cl, this);
 				}
 				else if (iid == "open") {
 					pi = new predicate_item_open(neg, once, call, num, cl, this);
@@ -6349,7 +6290,7 @@ void interpreter::run() {
 	generated_vars * variants = new generated_vars();
 	frame_item * ff = new frame_item();
 	variants->push_back(ff);
-	starter->processing(false, 0, variants, args, ff);
+	starter->processing(false, 0, variants, &args, ff);
 	delete args;
 	delete variants;
 	delete ff;
@@ -6373,6 +6314,7 @@ interpreter::interpreter(const string & fname, const string & starter_name) {
 	// FLAGS;
 	LEVELS.reserve(50000);
 	TRACE.reserve(50000);
+	TRACEARGS.reserve(50000);
 	TRACERS.reserve(50000);
 	ptrTRACE.reserve(50000);
 
@@ -6589,7 +6531,7 @@ int main(int argc, char ** argv) {
 			variants->push_back(f);
 			predicate_item_user * pi = new predicate_item_user(false, false, false, 0, NULL, &prolog, "internal_goal");
 			pi->bind();
-			bool ret = pi->processing(false, 0, variants, args, f);
+			bool ret = pi->processing(false, 0, variants, &args, f);
 
 			int itv = 0;
 			while (itv < f->get_size()) {
