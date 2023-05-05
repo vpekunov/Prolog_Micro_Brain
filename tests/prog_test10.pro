@@ -1,0 +1,16 @@
+	run :-
+		load_classes('Classes\\clsSimpleProgs','object','link'),
+		init_xpathing('RussianGrammar'),
+		add_object(max,clsSimpleScalar,[], 'Введем скаляр'),
+		add_object('V',clsSimpleVector,[param('Size','10')], 'Введем вектор'),
+		add_object(inV,clsSimpleInput,[param('IVar','V')], 'Введем вектор с клавиатуры'),
+		add_object('MaxVmax',clsSimpleMat,[param('IVar','V'),param('OVar',max),param('Op','Max')], 'Найдем максимум'),
+		add_object(outmax,clsSimpleOut,[param('IVar',max)], 'Вывести скаляр на экран'),
+		add_object('END',clsSimpleTerminator,[], ''),
+		add_object('hvvaiu',clsSimpleTest,[param('Input','1 2 3 4 5 6 7 8 9 10'),param('Output','V[0] = V[1] = V[2] = V[3] = V[4] = V[5] = V[6] = V[7] = V[8] = V[9] = max = 10.000000')], ''),
+		prepare_model_for_induct(A),
+		write(A),
+		induct_xpathing(60, 6, A, '_.xml', t, f, f),
+		import_model_after_induct('_.xml'),
+		prepare_model_for_induct('__prepared.xml'),
+		unload_classes.
