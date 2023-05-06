@@ -1,5 +1,5 @@
 	run :-
-		load_classes('Classes\\clsSimpleProgs','object','link'),
+		load_classes('Classes/clsSimpleProgs','object','link'),
 		init_xpathing('RussianGrammar'),
 		add_object(max,clsSimpleScalar,[], 'Введем скаляр'),
 		add_object('V',clsSimpleVector,[param('Size','10')], 'Введем вектор'),
