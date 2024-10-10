@@ -2,16 +2,16 @@
 		({page_id(A),write(A),fail}*5).
 
 	run2 :-
-		g_assign('res',[_,_,_,_,_]),
-		{page_id(A), B is A+1, g_assign_nth('res',B,A), fail}*5, {=0},
-		g_read('res',R),
+		g_assign('&res',[_,_,_,_,_]),
+		{page_id(A), B is A+1, g_assign_nth('&res',B,A), fail}*5, {=0},
+		g_read('&res',R),
 		write(R).
 
 	run3 :-
 		for(A, 1, 2000000), fail.
 
 	run4 :-
-		{for(A, 1, 1000000), fail}{for(A, 1, 1000000), fail},
+		{for(A, 1, 1000000), fail}{for(B, 1, 1000000), fail},
 		{=0}.
 
 	run5 :-

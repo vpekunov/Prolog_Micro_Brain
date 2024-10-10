@@ -2844,9 +2844,19 @@ public:
 		frame_item * r = f->copy(CTX);
 		result->push_back(r);
 
-		std::unique_lock<std::mutex> glock(prolog->GLOCK);
-		prolog->GVars[a1->get_name()] = a2->copy(CTX, r);
-		glock.unlock();
+		string new_name = a1->get_name();
+		if (CTX->forked() && (new_name.length() == 0 || new_name[0] != '&')) {
+			new_name.insert(0, 1, '*');
+			r->set(CTX, new_name.c_str(), a2->copy(CTX, r));
+		}
+		else {
+			std::unique_lock<std::mutex> glock(prolog->GLOCK);
+			std::map<std::string, value*>::iterator it = prolog->GVars.find(a1->get_name());
+			if (it != prolog->GVars.end())
+				it->second->free();
+			prolog->GVars[a1->get_name()] = a2->copy(CTX, r);
+			glock.unlock();
+		}
 
 		return result;
 	}
@@ -2874,16 +2884,30 @@ public:
 		generated_vars* result = new generated_vars();
 		frame_item* r = f->copy(CTX);
 
-		std::unique_lock<std::mutex> glock(prolog->GLOCK);
-		::list* L = dynamic_cast<::list*>(prolog->GVars[a1->get_name()]);
-		if (L && L->set_nth(a2->get_value(), a3->copy(CTX, r)))
-			result->push_back(r);
-		else {
-			delete r;
-			delete result;
-			result = NULL;
+		string new_name = a1->get_name();
+		if (CTX->forked() && (new_name.length() == 0 || new_name[0] != '&')) {
+			new_name.insert(0, 1, '*');
+			::list* L = dynamic_cast<::list*>(r->get(CTX, new_name.c_str()));
+			if (L && L->set_nth(a2->get_value(), a3->copy(CTX, r)))
+				result->push_back(r);
+			else {
+				delete r;
+				delete result;
+				result = NULL;
+			}
 		}
-		glock.unlock();
+		else {
+			std::unique_lock<std::mutex> glock(prolog->GLOCK);
+			::list* L = dynamic_cast<::list*>(prolog->GVars[a1->get_name()]);
+			if (L && L->set_nth(a2->get_value(), a3->copy(CTX, r)))
+				result->push_back(r);
+			else {
+				delete r;
+				delete result;
+				result = NULL;
+			}
+			glock.unlock();
+		}
 
 		return result;
 	}
@@ -2911,25 +2935,48 @@ public:
 		frame_item * r = f->copy(CTX);
 		result->push_back(r);
 
-		std::unique_lock<std::mutex> glock(prolog->GLOCK);
-		map<string, value *>::iterator it = prolog->GVars.find(a1->get_name());
-		if (it == prolog->GVars.end()) {
-			value * v = new int_number(0);
-			if (!a2->unify(CTX, r, v)) {
-				delete result;
-				result = NULL;
-				delete r;
+		string new_name = a1->get_name();
+		if (CTX->forked() && (new_name.length() == 0 || new_name[0] != '&')) {
+			new_name.insert(0, 1, '*');
+			value* v = r->get(CTX, new_name.c_str());
+			if (v) {
+				if (!a2->unify(CTX, r, v)) {
+					delete result;
+					result = NULL;
+					delete r;
+				}
 			}
-			v->free();
+			else {
+				v = new int_number(0);
+				if (!a2->unify(CTX, r, v)) {
+					delete result;
+					result = NULL;
+					delete r;
+				}
+				v->free();
+			}
 		}
 		else {
-			if (!a2->unify(CTX, r, it->second)) {
-				delete result;
-				result = NULL;
-				delete r;
+			std::unique_lock<std::mutex> glock(prolog->GLOCK);
+			map<string, value*>::iterator it = prolog->GVars.find(a1->get_name());
+			if (it == prolog->GVars.end()) {
+				value* v = new int_number(0);
+				if (!a2->unify(CTX, r, v)) {
+					delete result;
+					result = NULL;
+					delete r;
+				}
+				v->free();
 			}
+			else {
+				if (!a2->unify(CTX, r, it->second)) {
+					delete result;
+					result = NULL;
+					delete r;
+				}
+			}
+			glock.unlock();
 		}
-		glock.unlock();
 
 		return result;
 	}
@@ -6204,7 +6251,7 @@ public:
 		}
 		// Process
 		for (int i = 0; i < N; i++) {
-			CTX->add_page(f->tcopy(CTX), parent->get_item(self_number+1), parent->get_item(ending_number), prolog);
+			CTX->add_page(f->tcopy(CTX, prolog), parent->get_item(self_number+1), parent->get_item(ending_number), prolog);
 		}
 
 		return true;
@@ -6273,7 +6320,7 @@ public:
 		else
 			K = (int)(-0.5 + ni->get_value());
 		// Process
-		return CTX->join(K, f);
+		return CTX->join(K, f, prolog);
 	}
 };
 
