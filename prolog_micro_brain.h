@@ -116,12 +116,10 @@ public:
 	}
 
 	bool forked() {
-		bool locked = pages_mutex.try_lock();
 		context* C = this;
 		while (C && !C->THR)
 			C = C->parent;
 		bool result = C && C->THR;
-		if (locked) pages_mutex.unlock();
 		return result;
 	}
 
