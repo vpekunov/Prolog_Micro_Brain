@@ -465,6 +465,8 @@ string unescape(const string & s) {
 
 unsigned int mem_block_size = 1024 * 1024;
 
+std::mutex mem_lock;
+
 typedef struct {
 	unsigned int available;
 	unsigned int top;
@@ -483,6 +485,7 @@ stack_container<mem_block *> used;
 stack_container<mem_block *> freed;
 
 void * __alloc(size_t size) {
+	std::lock_guard<std::mutex> lock(mem_lock);
 	unsigned int occupied = size + (sizeof(int) + sizeof(unsigned int));
 	
 	char rest = occupied % 8;
@@ -530,6 +533,7 @@ void * __alloc(size_t size) {
 }
 
 void __free(void * ptr) {
+	std::lock_guard<std::mutex> lock(mem_lock);
 	mem_header * mm = (mem_header *)((char *)ptr - (sizeof(int) + sizeof(unsigned int)));
 	int offs = mm->start_offs;
 	mm->start_offs = -1;
@@ -546,6 +550,7 @@ void __free(void * ptr) {
 class string_atomizer {
 	map<string, unsigned int> hash;
 	vector<const string *> table;
+	std::mutex locker;
 public:
 	string_atomizer() { }
 	unsigned int get_atom(const string & s) {
@@ -554,6 +559,7 @@ public:
 		else if (s.length() == 2)
 			return (((unsigned char)s[1]) << 8) + (unsigned char)s[0];
 		else {
+			std::lock_guard<std::mutex> lock(locker);
 			map<string, unsigned int>::iterator it = hash.find(s);
 			if (it != hash.end())
 				return it->second;
@@ -579,7 +585,10 @@ public:
 			return string(buf);
 		}
 		else {
-			return *table[atom - 65536];
+			locker.lock();
+			string result = *table[atom - 65536];
+			locker.unlock();
+			return result;
 		}
 	}
 };
@@ -2888,8 +2897,10 @@ public:
 		if (CTX->forked() && (new_name.length() == 0 || new_name[0] != '&')) {
 			new_name.insert(0, 1, '*');
 			::list* L = dynamic_cast<::list*>(r->get(CTX, new_name.c_str()));
-			if (L && L->set_nth(a2->get_value(), a3->copy(CTX, r)))
+			if (L && L->set_nth(a2->get_value(), a3->copy(CTX, r))) {
+				r->register_write(new_name);
 				result->push_back(r);
+			}
 			else {
 				delete r;
 				delete result;
@@ -5145,6 +5156,40 @@ public:
 	}
 };
 
+class predicate_item_unset : public predicate_item {
+public:
+	predicate_item_unset(bool _neg, bool _once, bool _call, int num, clause* c, interpreter* _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) { }
+
+	virtual const string get_id() { return "unset"; }
+
+	virtual generated_vars* generate_variants(context* CTX, frame_item* f, vector<value*>*& positional_vals) {
+		if (positional_vals->size() != 1) {
+			std::cout << "unset(A) incorrect call!" << endl;
+			exit(-3);
+		}
+		bool d1 = positional_vals->at(0)->defined();
+		if (!d1) {
+			std::cout << "unset(A) indeterminated!" << endl;
+			exit(-3);
+		}
+
+		term* t = dynamic_cast<term*>(positional_vals->at(0));
+		if (t && t->get_args().size() == 0) {
+			frame_item* r = f->copy(CTX);
+
+			r->unset(CTX, t->get_name().c_str());
+
+			generated_vars* result = new generated_vars();
+
+			result->push_back(r);
+
+			return result;
+		}
+		else
+			return NULL;
+	}
+};
+
 class predicate_item_write : public predicate_item {
 public:
 	predicate_item_write(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) { }
@@ -6251,7 +6296,7 @@ public:
 		}
 		// Process
 		for (int i = 0; i < N; i++) {
-			CTX->add_page(f->tcopy(CTX, prolog), parent->get_item(self_number+1), parent->get_item(ending_number), prolog);
+			CTX->add_page(f->tcopy(CTX, prolog, true), parent->get_item(self_number+1), parent->get_item(ending_number), prolog);
 		}
 
 		return true;
@@ -6613,8 +6658,12 @@ vector<value *> * interpreter::accept(context * CTX, frame_item * ff, predicate_
 			delete empty;
 		}
 	else {
-		for (value * v : *current->_get_args())
-			result->push_back(v->const_copy(CTX, ff));
+		if (CTX && CTX->forked())
+			for (value* v : *current->_get_args())
+				result->push_back(v->copy(CTX, ff));
+		else
+			for (value * v : *current->_get_args())
+				result->push_back(v->const_copy(CTX, ff));
 	}
 	current->unlock();
 
@@ -6644,8 +6693,9 @@ bool interpreter::retrieve(context * CTX, frame_item * ff, clause * current, vec
 			delete empty;
 		}
 	else {
+		bool not_const = CTX && CTX->forked();
 		for (value * proto : *current->_get_args()) {
-			value * _item = proto->const_copy(CTX, ff);
+			value * _item = not_const ? proto->copy(CTX, ff) : proto->const_copy(CTX, ff);
 			if (!unify(CTX, ff, vals->at(k++), _item)) // Заполняем item, попутно заполняются унифицированные переменные
 				result = false;
 			_item->free();
@@ -6673,8 +6723,12 @@ vector<value *> * interpreter::accept(context * CTX, frame_item * ff, clause * c
 			delete empty;
 		}
 	else {
-		for (value * v : *current->_get_args())
-			result->push_back(v->copy(CTX, ff));
+		if (CTX && CTX->forked())
+			for (value* v : *current->_get_args())
+				result->push_back(v->copy(CTX, ff));
+		else
+			for (value* v : *current->_get_args())
+				result->push_back(v->const_copy(CTX, ff));
 	}
 	current->unlock();
 
@@ -7633,9 +7687,12 @@ void interpreter::parse_clause(context * CTX, vector<string> & renew, frame_item
 					else if (iid == "mars_decode") {
 						pi = new predicate_item_mars_decode(neg, once, call, num, cl, this);
 					}
+					else if (iid == "unset") {
+						pi = new predicate_item_unset(neg, once, call, num, cl, this);
+					}
 					else if (iid == "write") {
 						pi = new predicate_item_write(neg, once, call, num, cl, this);
-					}
+						}
 					else if (iid == "write_to_atom") {
 						pi = new predicate_item_write_to_atom(neg, once, call, num, cl, this);
 					}

@@ -7,11 +7,17 @@
 		g_read('&res',R),
 		write(R).
 
+	run21 :-
+		g_assign('res',[_,_,_,_,_]),
+		{page_id(A), B is A+1, g_assign_nth('res',B,A), unset('A'), unset('B')}*5, {&},
+		g_read('res',R),
+		write(R).
+
 	run3 :-
-		for(A, 1, 2000000), fail.
+		for(A, 1, 4000000), fail.
 
 	run4 :-
-		{for(A, 1, 1000000), fail}{for(B, 1, 1000000), fail},
+		{for(A, 1, 1000000), fail}{for(B, 1, 1000000), fail}{for(A, 1, 1000000), fail}{for(B, 1, 1000000), fail},
 		{=0}.
 
 	run5 :-
@@ -27,5 +33,10 @@
 
 	run6 :- make_page(6,R), write(R).
 
-	run7 :- {{for(A, 1, 1000000), fail},{for(A, 1, 1000000), fail},{&}}{for(A, 1, 1000000), fail},
+	run7 :- {{for(A, 1, 1000000), fail},{for(B, 1, 1000000), fail},{&}}{{for(A, 1, 1000000), fail},{for(B, 1, 1000000), fail},{&}},
 		{&}.
+
+	run8 :- {(for(M,1,1000),fail;true),g_assign('m',5),g_read('m',A),write(A)}{g_assign('m',6),g_read('m',B),write(B)},
+		{&},
+		g_read('m',X),
+		write(X).

@@ -1,6 +1,8 @@
 #ifndef __PROLOG_MICRO_BRAIN_H__
 #define __PROLOG_MICRO_BRAIN_H__
 
+#define _CRT_SECURE_NO_WARNINGS
+
 #include <vector>
 #include <string>
 #include <set>
@@ -10,6 +12,7 @@
 #include <algorithm>
 #include <atomic>
 
+#include <stdlib.h>
 #include <time.h>
 
 using namespace std;
@@ -102,7 +105,7 @@ public:
 		ptrTRACE.reserve(RESERVE);
 
 		THR = NULL;
-		FRAME = tframe;
+		FRAME.store(tframe);
 		this->starting = starting;
 		this->ending = ending;
 		this->prolog = prolog;
@@ -112,7 +115,7 @@ public:
 		for (context* C : CONTEXTS)
 			delete C;
 		delete THR;
-		delete FRAME;
+		delete FRAME.load();
 	}
 
 	bool forked() {
@@ -129,7 +132,7 @@ public:
 	predicate_item* ending;
 
 	vector<context*> CONTEXTS;
-	tframe_item* FRAME;
+	std::atomic<tframe_item*> FRAME;
 	tthread* THR;
 
 	stack_container<predicate_item*> CALLS;
@@ -275,6 +278,8 @@ public:
 	virtual void use() { refs++; }
 	virtual void free() { refs--; if (refs == 0) delete this; }
 
+	virtual int get_refs() { return refs; }
+
 	virtual value * fill(context * CTX, frame_item * vars) = 0;
 	virtual value * copy(context * CTX, frame_item * f, int unwind = 0) = 0;
 	virtual value * const_copy(context * CTX, frame_item * f) {
@@ -337,10 +342,15 @@ protected:
 	vector<char> names;
 
 	vector<mapper> vars;
+
+	int size_deleted;
+	char* deleted;
 public:
 	frame_item() {
 		names.reserve(32);
 		vars.reserve(8);
+		size_deleted = 0;
+		deleted = NULL;
 	}
 
 	virtual ~frame_item() {
@@ -350,6 +360,8 @@ public:
 				vars[it].ptr->free();
 			it++;
 		}
+		if (deleted)
+			free(deleted);
 	}
 
 	virtual void add_local_names(std::set<string>& s) {
@@ -365,6 +377,13 @@ public:
 			set(CTX, itc, other->vars[it].ptr);
 			it++;
 		}
+		if (other->deleted) {
+			char* cur = other->deleted;
+			while (*cur) {
+				unset(CTX, cur);
+				while (*cur++);
+			}
+		}
 	}
 
 	virtual frame_item * copy(context * CTX) {
@@ -379,7 +398,9 @@ public:
 		return result;
 	}
 
-	virtual tframe_item* tcopy(context* CTX, interpreter * INTRP);
+	virtual tframe_item* tcopy(context* CTX, interpreter * INTRP, bool import_globs);
+
+	virtual void register_write(const std::string & name) { }
 
 	int get_size() { return vars.size(); }
 
@@ -455,7 +476,7 @@ public:
 		bool found = false;
 		int it = find(name, found);
 		if (found) {
-			vars[it].ptr->free();
+			if (vars[it].ptr) vars[it].ptr->free();
 			vars[it].ptr = v ? v->copy(CTX, this) : NULL;
 		}
 		else {
@@ -471,6 +492,32 @@ public:
 			mapper m = { _name, v ? v->copy(CTX, this) : NULL };
 			vars.insert(vars.begin() + it, m);
 		}
+	}
+
+	virtual int unset(context* CTX, const char* name) {
+		bool found = false;
+		int it = find(name, found);
+		if (found) {
+			int old_size = size_deleted ? size_deleted : 1;
+			int n = strlen(name);
+			size_deleted = old_size + n + 1;
+			deleted = (char *) realloc(deleted, size_deleted*sizeof(char));
+			strcpy(&deleted[size_deleted - n - 2], name);
+			deleted[size_deleted - 1] = 0;
+
+			char* oldp = names.size() == 0 ? NULL : &names[0];
+			int oldn = names.size();
+			names.erase(names.begin() + (vars[it]._name - oldp), names.begin() + (vars[it]._name - oldp) + n + 1);
+			char* newp = &names[0];
+			for (int i = 0; i < vars.size(); i++)
+				if (vars[i]._name < vars[it]._name)
+					vars[i]._name += newp - oldp;
+				else
+					vars[i]._name += newp - oldp - n - 1;
+			vars.erase(vars.begin() + it);
+			return it;
+		} else
+			return -1;
 	}
 
 	virtual value * get(context * CTX, const char * name, int unwind = 0) {
@@ -596,6 +643,24 @@ public:
 		return result;
 	}
 
+	virtual int unset(context* CTX, const char* name) {
+		bool locked = mutex.try_lock();
+		int it = frame_item::unset(CTX, name);
+		if (it >= 0) {
+			last_reads.erase(last_reads.begin() + it);
+			first_writes.erase(first_writes.begin() + it);
+		}
+		if (locked) mutex.unlock();
+		return it;
+	}
+
+	virtual void register_write(const std::string & name) {
+		bool found = false;
+		int it = find(name.c_str(), found);
+		if (found && first_writes[it] == 0)
+			first_writes[it] = clock();
+	}
+
 	virtual clock_t first_write(const std::string& vname) {
 		bool found = false;
 		int it = find(vname.c_str(), found);
@@ -615,9 +680,11 @@ public:
 	}
 
 	virtual void sync(context* CTX, frame_item* other) {
+		bool locked = mutex.try_lock();
 		tframe_item* _other = dynamic_cast<tframe_item*>(other);
 		if (!_other) {
 			frame_item::sync(CTX, other);
+			if (locked) mutex.unlock();
 			return;
 		}
 		int it = 0;
@@ -634,6 +701,14 @@ public:
 			}
 			it++;
 		}
+		if (other->deleted) {
+			char* cur = other->deleted;
+			while (*cur) {
+				unset(CTX, cur);
+				while (*cur++);
+			}
+		}
+		if (locked) mutex.unlock();
 	}
 
 	virtual frame_item* copy(context* CTX) {
@@ -642,7 +717,7 @@ public:
 		long long d = result->names.size() == 0 ? 0 : &result->names[0] - &names[0];
 		result->vars = vars;
 		for (mapper& m : result->vars) {
-			m.ptr = m.ptr ? m.ptr->const_copy(CTX, this) : NULL;
+			m.ptr = m.ptr ? m.ptr->copy(CTX, this) : NULL;
 			m._name += d;
 		}
 		((tframe_item*)result)->first_writes = first_writes;
@@ -655,16 +730,16 @@ public:
 	}
 };
 
-tframe_item* frame_item::tcopy(context* CTX, interpreter* INTRP) {
+tframe_item* frame_item::tcopy(context* CTX, interpreter* INTRP, bool import_globs) {
 	tframe_item* result = new tframe_item();
 	result->names = names;
 	long long d = result->names.size() == 0 ? 0 : &result->names[0] - &names[0];
 	result->vars = vars;
 	for (mapper& m : result->vars) {
-		m.ptr = m.ptr ? m.ptr->const_copy(CTX, this) : NULL;
+		m.ptr = m.ptr ? m.ptr->copy(CTX, this) : NULL;
 		m._name += d;
 	}
-	if (CTX && (CTX->THR || CTX->forked())) {
+	if (CTX && import_globs /* && (CTX->THR || CTX->forked()) */) {
 		bool locked = INTRP->GLOCK.try_lock();
 		std::map<std::string, value*>::iterator it = INTRP->GVars.begin();
 		result->first_writes = vector<clock_t>(vars.size(), 0);
@@ -701,13 +776,13 @@ bool context::join(int K, frame_item* f, interpreter * INTRP) {
 	vector<bool> joineds(CONTEXTS.size(), false);
 	std::set<string> names;
 	do {
-		vector<bool> stoppeds = joineds;
-		int stopped = std::count(stoppeds.begin(), stoppeds.end(), true);
+		vector<bool> stoppeds(CONTEXTS.size());
+		int stopped = std::count(joineds.begin(), joineds.end(), true);
 		while (stopped < CONTEXTS.size()) {
 			for (int i = 0; i < CONTEXTS.size(); i++)
-				if (!stoppeds[i] && CONTEXTS[i]->THR->is_stopped()) {
+				if (!joineds[i] && !stoppeds[i] && CONTEXTS[i]->THR->is_stopped()) {
 					stoppeds[i] = true;
-					CONTEXTS[i]->FRAME->add_local_names(names);
+					CONTEXTS[i]->FRAME.load()->add_local_names(names);
 					stopped++;
 				}
 			std::this_thread::yield();
@@ -718,11 +793,11 @@ bool context::join(int K, frame_item* f, interpreter * INTRP) {
 			// Conflict Matrix
 			for (int i = 0; i < CONTEXTS.size(); i++)
 				for (int j = i + 1; j < CONTEXTS.size(); j++)
-					if (!joineds[i] && !joineds[j]) {
-						clock_t fwi = CONTEXTS[i]->FRAME->first_write(vname);
-						clock_t fwj = CONTEXTS[j]->FRAME->first_write(vname);
-						clock_t lri = CONTEXTS[i]->FRAME->last_read(vname);
-						clock_t lrj = CONTEXTS[j]->FRAME->last_read(vname);
+					if (stoppeds[i] && stoppeds[j]) {
+						clock_t fwi = CONTEXTS[i]->FRAME.load()->first_write(vname);
+						clock_t fwj = CONTEXTS[j]->FRAME.load()->first_write(vname);
+						clock_t lri = CONTEXTS[i]->FRAME.load()->last_read(vname);
+						clock_t lrj = CONTEXTS[j]->FRAME.load()->last_read(vname);
 						if (fwi || fwj) {
 							if (fwi && fwj)
 								M[i][j]++;
@@ -741,14 +816,14 @@ bool context::join(int K, frame_item* f, interpreter * INTRP) {
 		int first_winner = -1;
 		std::set<int> other_winners;
 		for (int i = 0; i < CONTEXTS.size(); i++)
-			if (!joineds[i]) {
+			if (stoppeds[i]) {
 				std::set<int> parallels;
 				for (int j = 0; j < i; j++) {
-					if (!joineds[j] && M[j][i] == 0)
+					if (stoppeds[j] && M[j][i] == 0)
 						parallels.insert(j);
 				}
 				for (int j = i + 1; j < CONTEXTS.size(); j++) {
-					if (!joineds[j] && M[i][j] == 0)
+					if (stoppeds[j] && M[i][j] == 0)
 						parallels.insert(j);
 				}
 				if (parallels.size() > other_winners.size()) {
@@ -757,25 +832,36 @@ bool context::join(int K, frame_item* f, interpreter * INTRP) {
 				}
 			}
 		if (first_winner < 0) {
+			clock_t min_time = 0;
+			for (const string& vname : names) {
+				for (int i = 0; i < CONTEXTS.size(); i++)
+					if (stoppeds[i]) {
+						clock_t tm = CONTEXTS[i]->FRAME.load()->first_write(vname);
+						if (tm && (!min_time || tm < min_time)) {
+							first_winner = i;
+							min_time = tm;
+						}
+					}
+			}
 			for (int i = 0; first_winner < 0 && i < CONTEXTS.size(); i++)
-				if (!joineds[i])
+				if (stoppeds[i])
 					first_winner = i;
 		}
 		// Set vars by threads with non-zero first_writes
 		for (const string& vname : names) {
 			int winner = -1;
-			if (CONTEXTS[first_winner]->FRAME->first_write(vname))
+			if (CONTEXTS[first_winner]->FRAME.load()->first_write(vname))
 				winner = first_winner;
 			else {
 				for (int i : other_winners)
-					if (CONTEXTS[i]->FRAME->first_write(vname)) {
+					if (CONTEXTS[i]->FRAME.load()->first_write(vname)) {
 						winner = i;
 						break;
 					}
 			}
 			if (winner >= 0 && CONTEXTS[winner]->THR->get_result()) {
 				value* old = f->get(this, vname.c_str());
-				value* cur = CONTEXTS[winner]->FRAME->get(CONTEXTS[winner], vname.c_str());
+				value* cur = CONTEXTS[winner]->FRAME.load()->get(CONTEXTS[winner], vname.c_str());
 				if (cur)
 					if (old && (vname.length() == 0 || vname[0] != '*')) {
 						if (!old->unify(this, f, cur))
@@ -788,10 +874,10 @@ bool context::join(int K, frame_item* f, interpreter * INTRP) {
 		// Join first_winner && other_winners
 		other_winners.insert(first_winner);
 		for (int i = 0; i < CONTEXTS.size(); i++)
-			if (!joineds[i]) {
+			if (stoppeds[i]) {
 				if (other_winners.find(i) == other_winners.end()) {
-					delete CONTEXTS[i]->FRAME;
-					CONTEXTS[i]->FRAME = f->tcopy(this, INTRP);
+					tframe_item* OLD = CONTEXTS[i]->FRAME.load();
+					CONTEXTS[i]->FRAME.store(f->tcopy(this, INTRP, false));
 					CONTEXTS[i]->THR->set_stopped(false);
 				}
 				else {
@@ -812,7 +898,7 @@ bool context::join(int K, frame_item* f, interpreter * INTRP) {
 	for (const string& vname : names) {
 		value* v = f->get(this, vname.c_str());
 		for (int i = 0; i < CONTEXTS.size(); i++)
-			CONTEXTS[i]->FRAME->set(CONTEXTS[i], vname.c_str(), NULL);
+			CONTEXTS[i]->FRAME.load()->set(CONTEXTS[i], vname.c_str(), NULL);
 		if (!forked && v && vname.length() && vname[0] == '*') {
 			string src_name = vname.substr(1);
 			std::map<std::string, value*>::iterator it = prolog->GVars.find(src_name);
@@ -1043,13 +1129,18 @@ public:
 };
 
 void tthread::body() {
+	tframe_item* OLD_FRAME = NULL;
 	set_stopped(false);
 	do {
 		terminated.clear();
+		delete OLD_FRAME;
+		while (OLD_FRAME == CONTEXT->FRAME.load())
+			std::this_thread::yield();
+		OLD_FRAME = CONTEXT->FRAME.load();
 		// Process
 		predicate_item* first = CONTEXT->starting;
-		vector<value*>* first_args = CONTEXT->prolog->accept(CONTEXT, CONTEXT->FRAME, first);
-		set_result(CONTEXT->prolog->process(CONTEXT, false, first->get_parent(), first, CONTEXT->FRAME, &first_args));
+		vector<value*>* first_args = CONTEXT->prolog->accept(CONTEXT, OLD_FRAME, first);
+		set_result(CONTEXT->prolog->process(CONTEXT, false, first->get_parent(), first, OLD_FRAME, &first_args));
 		if (first_args) {
 			for (int j = 0; j < first_args->size(); j++)
 				first_args->at(j)->free();
