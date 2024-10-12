@@ -6381,7 +6381,7 @@ void interpreter::block_process(context * CNT, bool clear_flag, bool cut_flag, p
 		int flags = *(--itf);
 		int level = CNT->LEVELS[nn];
 
-		if (cut_flag && frontier && CNT->PARENT_CALLS.top()->get_parent() &&
+		if (cut_flag && frontier && CNT->PARENT_CALLS.size() && CNT->PARENT_CALLS.top()->get_parent() &&
 			WHO && WHO->get_parent() == CNT->PARENT_CALLS.top()->get_parent() &&
 			n == CNT->PARENT_CALL_VARIANT.top() &&
 			level == CNT->PARENT_CALLS.size() - 1)
@@ -6402,7 +6402,7 @@ void interpreter::block_process(context * CNT, bool clear_flag, bool cut_flag, p
 			break;
 		}
 
-		if (cut_flag && CNT->PARENT_CALLS.top()->get_parent() &&
+		if (cut_flag && CNT->PARENT_CALLS.size() && CNT->PARENT_CALLS.top()->get_parent() &&
 			WHO && WHO->get_parent() == CNT->PARENT_CALLS.top()->get_parent() &&
 			n == CNT->PARENT_CALL_VARIANT.top() &&
 			level == CNT->PARENT_CALLS.size()-1)
@@ -7354,13 +7354,12 @@ void interpreter::parse_clause(context * CTX, vector<string> & renew, frame_item
 						once = true;
 						brackets.push(NULL);
 						p += 5;
+						bracket_level++;
 					}
-					bracket_level++;
 				}
 				else if (s.substr(p, 5) == "call(") {
 					if (!neg) call = true;
 					p += 4;
-					bracket_level++;
 				}
 
 				bypass_spaces(s, p);
@@ -8225,7 +8224,7 @@ int main(int argc, char ** argv) {
 		main_part++;
 	}
 
-	std::cout << "Prolog MicroBrain by V.V.Pekunov V0.21beta2" << endl;
+	std::cout << "Prolog MicroBrain by V.V.Pekunov V0.23beta1" << endl;
 	if (argc == main_part) {
 		interpreter prolog("", "");
 		std::cout << "  Enter 'halt.' or 'end_of_file' to exit." << endl << endl;

@@ -40,3 +40,5 @@
 		{&},
 		g_read('m',X),
 		write(X).
+
+	run9 :- for(A,1,10),{for(M,1,100000000),!,fail},{=0},write(A),fail.
