@@ -20,7 +20,7 @@
 
 Для выхода из интерпретатора достаточно дать команду halt.
 
-***Поддерживаемые предикаты и операции***
+***Основные поддерживаемые предикаты и операции***
 - ()
 - \\+
 - ;
@@ -51,6 +51,7 @@
 - $predicate_property_pi
 - g_assign
 - g_read
+- g_assign_nth
 - fail
 - true
 - open
@@ -89,3 +90,5 @@
 - import_model_after_induct
 - atom_hex
 - atom_hexs
+- page_id
+- unset
