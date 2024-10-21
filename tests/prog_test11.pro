@@ -167,22 +167,13 @@
 					nth(Thread, Sch, [From, End]),
 					for (K, 2, CSqrtN),
 						prime(K),
-						R0 is From - ceiling(From/K)*K,
+						R is From - floor(From/K)*K,
+						Jp is From - R - K,
 						(
-							=(From, K)->
-								=(R,K);
-								(
-									\=(R0,0)->
-										(R is K - R0);
-										=(R, R0)
-								)
+							<(Jp,2)->
+								J is Jp + 2*K;
+								J is Jp + K
 						),
-						J0 is From + R - K,
-						(
-							<(J0,0)->
-								(J is J0+K);
-								=(J, J0)
-						)
 						once(mark_nprimes(J, K, End)),
 						fail
 				},

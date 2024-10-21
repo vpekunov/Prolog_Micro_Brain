@@ -7756,7 +7756,7 @@ void interpreter::parse_clause(context * CTX, vector<string> & renew, frame_item
 						int br_level = 0;
 						while (p < s.length() && (
 							(in_quote || s[p] == '_' || isspace(s[p]) || isalnum(s[p]) || expr_chars.find(s[p]) != string::npos) ||
-							s[p] == ',' && br_level ||
+							(s[p] == ',' || s[p] == ';') && br_level ||
 							p + 1 < s.length() && s[p] == '.' && isdigit(s[p + 1])
 							)) {
 							if (in_quote && s[p] == '\\') p++;
