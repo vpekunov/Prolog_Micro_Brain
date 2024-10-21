@@ -95,7 +95,7 @@
 	mark_nprimes(First, _, N):-
 		>(First, N).
 	mark_nprimes(First, Step, N):-
-		once((retract(prime(First));true)),
+		once(retract(prime(First));true),
 		Next is First + Step,
 		once(mark_nprimes(Next, Step, N)).
 

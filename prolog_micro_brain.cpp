@@ -7604,9 +7604,12 @@ void interpreter::parse_clause(context * CTX, vector<string> & renew, frame_item
 					if (once) {
 						s.insert(p, "(");
 						brackets.pop();
+						bracket_level--;
 					}
 					once = false;
 				}
+				else if (once)
+					s.insert(p, "(");
 
 				bypass_spaces(s, p);
 				if (p + 2 < s.length() && s[p] == '\'' && s[p + 1] == ',' && s[p + 2] == '\'')
@@ -7699,6 +7702,8 @@ void interpreter::parse_clause(context * CTX, vector<string> & renew, frame_item
 
 							pi = _pi;
 						}
+						if (brackets.size() && !brackets.top())
+							s.insert(p, ")");
 					}
 				}
 				else {
