@@ -6,7 +6,7 @@
 	run_once(X):-once(member(V,[1,3,X,7])),write(V),fail;true.
 
 	loop(N,N).
-	loop(X,N):-write(X),inc(X,X1),loop(X1,N).
+	loop(X,N):-write(X),X1 is X+1,loop(X1,N).
 
 	repeat.
 	repeat:-repeat.
@@ -17,7 +17,7 @@
 	once_2:-once(repeat), write('@'), once1, fail.
 	once_2.
 
-	handle:-once(once_2),eq(A,1),loop(0,5),eq(B,2),run(5),run(8),run_once(9),eq(B,2),eq([A,B],[_,V]),write(V),variants([3,5,2]),
+	handle:-once(once_2),=(A,1),loop(0,5),=(B,2),run(5),run(8),run_once(9),=(B,2),=([A,B],[_,V]),write(V),variants([3,5,2]),
 		append([1,2|[3,4,5]],[7,8],P),write(P).
 
 	start:-handle.
