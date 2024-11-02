@@ -53,6 +53,11 @@
 
 	run14 :- simples_par(8000,4).
 
+	run15 :- {g_assign('m',5),{g_assign('m',6),g_read('m',A),write(A),fail},{=0},g_read('m',B),write(B)},
+		{&},
+		g_read('m',X),
+		write(X).
+
 	generate_facts(This,N):-
 		>(This,N),
 		!.
