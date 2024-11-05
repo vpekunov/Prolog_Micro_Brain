@@ -58,7 +58,7 @@
 		g_read('m',X),
 		write(X).
 
-	run16 :- =(C,1),{=(B,1),{{{{=(A,2)}}}},(run3;true),{&}},=(D,1),{&},write(A),write(B),write(C),write(D).
+	run16 :- =(C,1),{=(B,1),{{{{=(A,2)}}}},(run6;true),{&}},=(D,1),{&},write(A),write(B),write(C),write(D).
 
 	generate_facts(This,N):-
 		>(This,N),
