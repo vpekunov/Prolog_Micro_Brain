@@ -1,9 +1,18 @@
 	run :-
 		({page_id(A),write(A),fail}*5).
 
+	run_ :-
+		(*{page_id(A),write(A)}*5).
+
 	run2 :-
 		g_assign('&res',[_,_,_,_,_]),
 		{page_id(A), B is A+1, g_assign_nth('&res',B,A), fail}*5, {=0},
+		g_read('&res',R),
+		write(R).
+
+	run2_ :-
+		g_assign('&res',[_,_,_,_,_]),
+		*{page_id(A), B is A+1, g_assign_nth('&res',B,A)}*5, {&},
 		g_read('&res',R),
 		write(R).
 
@@ -33,7 +42,7 @@
 
 	run6 :- make_page(6,R), write(R).
 
-	run7 :- {{for(A, 1, 1000000), fail},{for(B, 1, 1000000), fail},{&}}{{for(A, 1, 1000000), fail},{for(B, 1, 1000000), fail},{&}},
+	run7 :- {{for(A, 1, 1000000), fail},{for(B, 1, 1000000), fail},{=0}}{{for(A, 1, 1000000), fail},{for(B, 1, 1000000), fail},{=0}},
 		{&}.
 
 	run8 :- {(for(M,1,1000),fail;true),g_assign('m',5),g_read('m',A),write(A)}{g_assign('m',6),g_read('m',B),write(B)},
@@ -167,7 +176,7 @@
 		(
 			(
 			  for (I, 0, M1),
-				{
+				*{
 					g_read('&schedule', Sch),
 					page_id(ID),
 					Thread is ID+1,
@@ -182,11 +191,10 @@
 								J is Jp + K
 						),
 						once(mark_nprimes(J, K, End)),
-						fail
 				},
 				fail
 			);
 			true
 		),
-		{=0},
+		{&},
 		!.
