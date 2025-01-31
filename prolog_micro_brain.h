@@ -84,12 +84,39 @@ typedef struct {
 	value* ptr;
 } mapper;
 
+class journal_item;
+class journal;
+
+typedef enum { jInsert = 0, jDelete } jTypes;
+
 class context {
 public:
 	context(bool locals_in_forked, bool transactable_facts, predicate_item * forker, int RESERVE, context * parent, tframe_item * tframe, predicate_item * starting, predicate_item * ending, interpreter * prolog) {
 		this->parent = parent;
 		this->locals_in_forked = locals_in_forked;
 		this->transactable_facts = transactable_facts;
+
+		if (!transactable_facts && parent != NULL) {
+			DBLOCK = parent->DBLOCK;
+			DB = parent->DB;
+			DBJournal = parent->DBJournal;
+		}
+		else {
+			DBLOCK = new std::mutex();
+			DB = new map< string, vector<term*>*>();
+			if (parent) {
+				std::unique_lock<std::mutex> lock(*parent->DBLOCK);
+				map< string, vector<term*>*>::iterator itd = parent->DB->begin();
+				while (itd != parent->DB->end()) {
+					if (itd->second) {
+						(*DB)[itd->first] = new vector<term*>(*itd->second);
+					}
+					itd++;
+				}
+				lock.unlock();
+			}
+			DBJournal = new map<string, journal*>();
+		}
 
 		CALLS.reserve(RESERVE);
 		FRAMES.reserve(RESERVE);
@@ -117,6 +144,22 @@ public:
 	virtual ~context() {
 		for (context* C : CONTEXTS)
 			delete C;
+		if (transactable_facts || parent == NULL) {
+			map< string, vector<term*>*>::iterator itd = DB->begin();
+			while (itd != DB->end()) {
+				delete itd->second;
+				itd++;
+			}
+			delete DBLOCK;
+			delete DB;
+
+			map<string, journal*>::iterator itj = DBJournal->begin();
+			while (itj != DBJournal->end()) {
+				delete itj->second;
+				itj++;
+			}
+			delete DBJournal;
+		}
 		delete THR;
 		delete FRAME.load();
 	}
@@ -136,6 +179,10 @@ public:
 	predicate_item* ending;
 	bool locals_in_forked;
 	bool transactable_facts;
+
+	std::mutex * DBLOCK;
+	map< string, vector<term*>*> * DB;
+	map<string, journal*> * DBJournal;
 
 	vector<context*> CONTEXTS;
 	std::atomic<tframe_item*> FRAME;
@@ -160,6 +207,10 @@ public:
 
 	virtual context* add_page(bool locals_in_forked, bool transactable_facts, predicate_item * forker, tframe_item* f, predicate_item* starting, predicate_item* ending, interpreter* prolog);
 
+	virtual void register_db_read(const std::string& iid);
+
+	virtual void register_db_write(const std::string& iid, jTypes t, value* data, int position);
+	
 	virtual bool join(int K, frame_item* f, interpreter* INTRP);
 };
 
@@ -177,13 +228,13 @@ public:
 	string INDUCT_MODE;
 
 	map<string, predicate *> PREDICATES;
-	std::mutex DBLOCK;
-	map< string, vector<term *> *> DB;
-	map< string, set<int> *> DBIndicators;
 	std::mutex GLOCK;
 	map<string, value *> GVars;
 	map<string, std::recursive_mutex *> STARLOCKS;
 	std::recursive_mutex STARLOCK;
+
+	map< string, set<int>*> DBIndicators;
+	std::mutex DBILock;
 
 	context* CONTEXT;
 
@@ -535,10 +586,11 @@ public:
 			names.erase(names.begin() + (vars[it]._name - oldp), names.begin() + (vars[it]._name - oldp) + n + 1);
 			char* newp = &names[0];
 			for (int i = 0; i < vars.size(); i++)
-				if (vars[i]._name < vars[it]._name)
-					vars[i]._name += newp - oldp;
-				else
-					vars[i]._name += newp - oldp - n - 1;
+				if (i != it)
+					if (vars[i]._name < vars[it]._name)
+						vars[i]._name += newp - oldp;
+					else
+						vars[i]._name += newp - oldp - n - 1;
 			vars.erase(vars.begin() + it);
 			return it;
 		} else
@@ -556,6 +608,9 @@ public:
 		else
 			return NULL;
 	}
+
+	virtual void register_facts(context* CTX, std::set<string>& names) { }
+	virtual void unregister_facts(context* CTX) { }
 };
 
 class tthread : public std::thread {
@@ -601,6 +656,7 @@ public:
 
 class tframe_item : public frame_item {
 	friend class frame_item;
+	friend class journal;
 
 	vector<clock_t> last_reads;
 	vector<clock_t> first_writes;
@@ -736,6 +792,29 @@ public:
 			fw = fr = lw = lr = 0;
 		}
 		cr = creation;
+	}
+
+	virtual void register_fact_group(context* CTX, string & fact, journal* J);
+
+	virtual void unregister_fact_group(context* CTX, string & fact);
+
+	virtual void register_facts(context* CTX, std::set<string>& names) {
+		map<string, journal*>::iterator it = CTX->DBJournal->begin();
+		while (it != CTX->DBJournal->end()) {
+			string fact = it->first;
+			register_fact_group(CTX, fact, it->second);
+			names.insert(fact);
+			it++;
+		}
+	}
+
+	virtual void unregister_facts(context* CTX) {
+		map<string, journal*>::iterator it = CTX->DBJournal->begin();
+		while (it != CTX->DBJournal->end()) {
+			string fact = it->first;
+			unregister_fact_group(CTX, fact);
+			it++;
+		}
 	}
 
 	virtual void sync(context* CTX, frame_item* other) {
@@ -1020,5 +1099,105 @@ public:
 
 	virtual bool processing(context * CONTEXT, bool line_neg, int variant, generated_vars * variants, vector<value *> ** positional_vals, frame_item * up_f, context * up_c);
 };
+
+class journal_item {
+public:
+	jTypes type;
+	value* data;
+	int position;
+
+	journal_item(jTypes t, value* data, int position) {
+		this->type = t;
+		this->data = data;
+		this->position = position;
+	}
+
+	virtual ~journal_item() {
+		if (this->type == jInsert)
+			this->data->free();
+	}
+};
+
+class journal {
+public:
+	clock_t creation;
+	clock_t first_write, last_write, first_read, last_read;
+
+	vector<journal_item*> log;
+
+	journal() {
+		creation = clock();
+
+		first_write = last_write = first_read = last_read = 0;
+	}
+
+	virtual ~journal() {
+		for (journal_item* it : log)
+			delete it;
+	}
+
+	virtual void register_read() {
+		if (!first_read)
+			first_read = clock();
+		last_read = clock();
+	}
+
+	virtual void register_write(jTypes t, value* data, int position) {
+		if (!first_write)
+			first_write = clock();
+		last_write = clock();
+
+		log.push_back(new journal_item(t, data, position));
+	}
+};
+
+void context::register_db_read(const std::string& iid) {
+	map<string, journal*>::iterator it = DBJournal->find(iid);
+	if (it == DBJournal->end()) {
+		(*DBJournal)[iid] = new journal();
+		it = DBJournal->find(iid);
+	}
+	it->second->register_read();
+}
+
+void context::register_db_write(const std::string& iid, jTypes t, value* data, int position) {
+	map<string, journal*>::iterator it = DBJournal->find(iid);
+	if (it == DBJournal->end()) {
+		(*DBJournal)[iid] = new journal();
+		it = DBJournal->find(iid);
+	}
+	it->second->register_write(t, data, position);
+}
+
+void tframe_item::register_fact_group(context* CTX, string & fact, journal* J) {
+	bool locked = mutex.try_lock();
+	bool found = false;
+	fact.insert(0, 1, '!');
+	int it = find(fact.c_str(), found);
+	if (!found) {
+		set(CTX, fact.c_str(), NULL);
+		it = find(fact.c_str(), found);
+	}
+	if (!first_writes[it] || first_writes[it] > J->first_write)
+		first_writes[it] = J->first_write;
+	if (!last_writes[it] || last_writes[it] < J->last_write)
+		last_writes[it] = J->last_write;
+	if (!first_reads[it] || first_reads[it] > J->first_read)
+		first_reads[it] = J->first_read;
+	if (!last_reads[it] || last_reads[it] < J->last_read)
+		last_reads[it] = J->last_read;
+	if (locked) mutex.unlock();
+}
+
+void tframe_item::unregister_fact_group(context* CTX, string & fact) {
+	bool locked = mutex.try_lock();
+	bool found = false;
+	fact.insert(0, 1, '!');
+	int it = find(fact.c_str(), found);
+	if (found)
+		unset(CTX, fact.c_str());
+
+	if (locked) mutex.unlock();
+}
 
 #endif
