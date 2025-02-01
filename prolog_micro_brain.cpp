@@ -649,8 +649,10 @@ bool context::join(int K, frame_item* f, interpreter* INTRP) {
 								CONTEXTS[j]->FRAME.load()->statistics(vname, crj, fwj, frj, lwj, lrj);
 							if (fwi || fwj) {
 								if (fwi && fwj) {
-									M[i][j]++;
-									conflictors.insert(vname);
+									if (fri && fri <= fwi || frj && frj <= fwj) {
+										M[i][j]++;
+										conflictors.insert(vname);
+									}
 								}
 								else if (fwi) {
 									if ((lwi >= crj) && lrj) {
@@ -744,69 +746,7 @@ bool context::join(int K, frame_item* f, interpreter* INTRP) {
 				if (stoppeds[i])
 					first_winner = i;
 		}
-		// Set vars by threads with non-zero first_writes
-		for (const string& vname : names) {
-			int winner = -1;
-			if (lnames[first_winner].find(vname) != lnames[first_winner].end() &&
-				(mainlined && (dynamic_cast<tframe_item *>(f) == NULL || dynamic_cast<tframe_item*>(f)->first_write(vname)) ||
-				 CONTEXTS[first_winner]->FRAME.load()->first_write(vname)))
-				winner = first_winner;
-			else {
-				for (int i : other_winners)
-					if (lnames[i].find(vname) != lnames[i].end() && CONTEXTS[i]->FRAME.load()->first_write(vname)) {
-						winner = i;
-						break;
-					}
-			}
-			if (winner >= 0 && winner < CONTEXTS.size()-1 && CONTEXTS[winner]->THR->get_result())
-				if (vname[0] == '!') {
-					std::unique_lock<std::mutex> dblock(*DBLOCK);
-					string fact = vname.substr(1);
-					map<string, journal*>::iterator its = CONTEXTS[winner]->DBJournal->find(fact);
-					if (its != CONTEXTS[winner]->DBJournal->end()) {
-						journal* SRC = its->second;
-						map<string, vector<term*>*>::iterator it = DB->find(fact);
-						if (it == DB->end()) {
-							(*DB)[fact] = new vector<term*>();
-							it = DB->find(fact);
-						}
-						// Apply journal
-						for (journal_item* jlog : SRC->log) {
-							if (jlog->type == jInsert) {
-								register_db_write(fact, jInsert, jlog->data, jlog->position);
-								it->second->insert(it->second->begin() + jlog->position, (term*)jlog->data);
-								jlog->data->use(); // to prevent free in ~journal_item()
-							}
-							else if (jlog->type == jDelete) {
-								register_db_write(fact, jDelete, jlog->data, jlog->position);
-								it->second->erase(it->second->begin() + jlog->position);
-							}
-							else {
-								cout << "Internal error : unknown DB journal record type!" << endl;
-								exit(1700);
-							}
-						}
-						// Clear journal
-						delete SRC;
-						CONTEXTS[winner]->DBJournal->erase(fact);
-					}
-					dblock.unlock();
-				}
-				else
-				{
-					value* old = f->get(this, vname.c_str());
-					value* cur = CONTEXTS[winner]->FRAME.load()->get(CONTEXTS[winner], vname.c_str());
-					if (cur)
-						if (old && (vname.length() == 0 || vname[0] != '*')) {
-							if (!old->unify(this, f, cur))
-								CONTEXTS[winner]->THR->set_result(false);
-						}
-						else
-							f->set(this, vname.c_str(), cur);
-				}
-		}
 		f->unregister_facts(this);
-		// Join first_winner && other_winners
 		if (!mainlined)
 			other_winners.insert(first_winner);
 		else {
@@ -815,6 +755,58 @@ bool context::join(int K, frame_item* f, interpreter* INTRP) {
 			success++;
 			joined++;
 		}
+		// Set vars by threads with non-zero first_writes
+		for (int winner : other_winners)
+			for (const string& vname : names)
+				if (lnames[winner].find(vname) != lnames[winner].end() && CONTEXTS[winner]->FRAME.load()->first_write(vname))
+				{
+					if (vname[0] == '!') {
+						std::unique_lock<std::mutex> dblock(*DBLOCK);
+						string fact = vname.substr(1);
+						map<string, journal*>::iterator its = CONTEXTS[winner]->DBJournal->find(fact);
+						if (its != CONTEXTS[winner]->DBJournal->end()) {
+							journal* SRC = its->second;
+							map<string, vector<term*>*>::iterator it = DB->find(fact);
+							if (it == DB->end()) {
+								(*DB)[fact] = new vector<term*>();
+								it = DB->find(fact);
+							}
+							// Apply journal
+							for (journal_item* jlog : SRC->log) {
+								if (jlog->type == jInsert) {
+									register_db_write(fact, jInsert, jlog->data, jlog->position);
+									it->second->insert(it->second->begin() + jlog->position, (term*)jlog->data);
+									jlog->data->use(); // to prevent free in ~journal_item()
+								}
+								else if (jlog->type == jDelete) {
+									register_db_write(fact, jDelete, jlog->data, jlog->position);
+									it->second->erase(it->second->begin() + jlog->position);
+								}
+								else {
+									cout << "Internal error : unknown DB journal record type!" << endl;
+									exit(1700);
+								}
+							}
+							// Clear journal
+							delete SRC;
+							CONTEXTS[winner]->DBJournal->erase(fact);
+						}
+						dblock.unlock();
+					}
+					else if (vname[0] == '*' || CONTEXTS[winner]->THR->get_result())
+					{
+						value* old = f->get(this, vname.c_str());
+						value* cur = CONTEXTS[winner]->FRAME.load()->get(CONTEXTS[winner], vname.c_str());
+						if (cur)
+							if (old && (vname.length() == 0 || vname[0] != '*')) {
+								if (!old->unify(this, f, cur))
+									CONTEXTS[winner]->THR->set_result(false);
+							}
+							else
+								f->set(this, vname.c_str(), cur);
+					}
+				}
+		// Join first_winner && other_winners
 		for (int i = 0; i < CONTEXTS.size(); i++)
 			if (stoppeds[i]) {
 				if (other_winners.find(i) == other_winners.end()) {
@@ -2059,8 +2051,8 @@ bool predicate_item_user::processing(context * CONTEXT, bool line_neg, int varia
 			CONTEXT->_FLAGS.pop();
 		}
 
-		if (yes && (CONTEXT == prolog->CONTEXT && CONTEXT->PARENT_CALLS.size() == 0))
-			up_f->sync(CONTEXT, f);
+		if (up_f && f)
+			up_f->sync(yes && CONTEXT == prolog->CONTEXT && CONTEXT->PARENT_CALLS.size() == 0, CONTEXT, f);
 
 		delete f;
 
@@ -2077,6 +2069,9 @@ bool predicate_item_user::processing(context * CONTEXT, bool line_neg, int varia
 			CONTEXT->NEGS.pop();
 			CONTEXT->_FLAGS.pop();
 		}
+
+		if (up_f && f)
+			up_f->sync(false, CONTEXT, f);
 
 		delete f;
 
@@ -4771,8 +4766,17 @@ public:
 		params p;
 		p.d1 = positional_vals->at(0)->defined();
 		p.L2 = dynamic_cast<::list *>(positional_vals->at(1));
+		if (p.L2)
+			p.L2->use();
 		lock();
+
+		if (d.find(CTX) != d.end()) {
+			::list* L2 = d[CTX].L2;
+			if (L2)
+				L2->free();
+		}
 		d[CTX] = p;
+
 		unlock();
 
 		if (!p.L2) {
@@ -4846,7 +4850,14 @@ public:
 		p.first = (int)(0.5 + FROM->get_value());
 		p.last = (int)(0.5 + TO->get_value());
 
+		p.V->use();
+
 		lock();
+		if (d.find(CTX) != d.end()) {
+			var * V = d[CTX].V;
+			if (V)
+				V->free();
+		}
 		d[CTX] = p;
 		unlock();
 
@@ -6795,6 +6806,8 @@ public:
 		if (n_threads)
 			n_threads->free();
 		n_threads = v;
+		if (n_threads)
+			n_threads->use();
 	}
 
 	virtual void set_end(int end) {
@@ -7401,6 +7414,9 @@ bool interpreter::process(context * CONTEXT, bool neg, clause * this_clause, pre
 						CNT->TRACEARGS.pop();
 						CNT->TRACERS.pop();
 
+						if (f && ff)
+							f->sync(false, CNT, ff);
+
 						if (variants)
 							variants->delete_from(i);
 						else
@@ -7422,6 +7438,9 @@ bool interpreter::process(context * CONTEXT, bool neg, clause * this_clause, pre
 						CNT->FLAGS.pop_back();
 						CNT->LEVELS.pop();
 						CNT->ptrTRACE.pop();
+
+						if (f && ff)
+							f->sync(false, CNT, ff);
 
 						if (variants)
 							variants->delete_from(i);
@@ -7448,6 +7467,9 @@ bool interpreter::process(context * CONTEXT, bool neg, clause * this_clause, pre
 						CNT->FLAGS.pop_back();
 						CNT->LEVELS.pop();
 						CNT->ptrTRACE.pop();
+
+						if (f && ff)
+							f->sync(false, CNT, ff);
 
 						if (variants)
 							variants->delete_from(i);
@@ -7508,10 +7530,10 @@ bool interpreter::process(context * CONTEXT, bool neg, clause * this_clause, pre
 							CNT->ptrTRACE.pop();
 
 							if (CNT && CNT->FRAME && CNT->forker && p && p == dynamic_cast<predicate_item_fork*>(CNT->forker)->get_last(i))
-								CNT->FRAME.load()->sync(CNT, ff);
+								CNT->FRAME.load()->sync(true, CNT, ff);
 
-							if (CNT->PARENT_CALLS.size() == 0)
-								f->sync(CNT, ff);
+							if (f && ff)
+								f->sync(CNT->PARENT_CALLS.size() == 0, CNT, ff);
 
 							if (variants)
 								variants->delete_from(i);
@@ -7664,7 +7686,7 @@ bool interpreter::process(context * CONTEXT, bool neg, clause * this_clause, pre
 						CNT->ptrTRACE.pop();
 
 						if (CNT && CNT->FRAME && CNT->forker && p && p == dynamic_cast<predicate_item_fork*>(CNT->forker)->get_last(i))
-							CNT->FRAME.load()->sync(CNT, ff);
+							CNT->FRAME.load()->sync(true, CNT, ff);
 
 						if (variants)
 							variants->delete_from(i);
@@ -7683,6 +7705,8 @@ bool interpreter::process(context * CONTEXT, bool neg, clause * this_clause, pre
 				}
 			}
 			CNT->ptrTRACE.pop();
+			if (f && ff)
+				f->sync(false, CNT, ff);
 			delete ff;
 		}
 		if (lb) lb->leave_critical();

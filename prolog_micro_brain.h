@@ -440,14 +440,15 @@ public:
 				s.insert(m._name);
 	}
 
-	virtual void sync(context * CTX, frame_item * other) {
+	virtual void sync(bool not_sync_globs, context * CTX, frame_item * other) {
 		int it = 0;
 		while (it < other->vars.size()) {
 			char * itc = other->vars[it]._name;
-			set(CTX, itc, other->vars[it].ptr);
+			if (not_sync_globs || *itc == '*')
+				set(CTX, itc, other->vars[it].ptr);
 			it++;
 		}
-		if (other->deleted) {
+		if (not_sync_globs && other->deleted) {
 			char* cur = other->deleted;
 			while (*cur) {
 				unset(CTX, cur);
@@ -817,11 +818,11 @@ public:
 		}
 	}
 
-	virtual void sync(context* CTX, frame_item* other) {
+	virtual void sync(bool not_sync_globs, context* CTX, frame_item* other) {
 		bool locked = mutex.try_lock();
 		tframe_item* _other = dynamic_cast<tframe_item*>(other);
 		if (!_other) {
-			frame_item::sync(CTX, other);
+			frame_item::sync(not_sync_globs, CTX, other);
 			if (locked) mutex.unlock();
 			return;
 		}
@@ -829,21 +830,23 @@ public:
 		while (it < _other->vars.size()) {
 			bool f;
 			char* itc = _other->vars[it]._name;
-			set(CTX, itc, _other->vars[it].ptr);
-			int _it = find(itc, f);
-			if (f) {
-				first_writes[_it] = _other->first_writes[it];
-				last_writes[_it] = _other->last_writes[it];
-				first_reads[_it] = _other->first_reads[it];
-				last_reads[_it] = _other->last_reads[it];
-			}
-			else {
-				cout << "Internal ERROR : can't sync tframe_item : var '" << itc << "'" << endl;
-				exit(-60);
+			if (not_sync_globs || *itc == '*') {
+				set(CTX, itc, _other->vars[it].ptr);
+				int _it = find(itc, f);
+				if (f) {
+					first_writes[_it] = _other->first_writes[it];
+					last_writes[_it] = _other->last_writes[it];
+					first_reads[_it] = _other->first_reads[it];
+					last_reads[_it] = _other->last_reads[it];
+				}
+				else {
+					cout << "Internal ERROR : can't sync tframe_item : var '" << itc << "'" << endl;
+					exit(-60);
+				}
 			}
 			it++;
 		}
-		if (other->deleted) {
+		if (not_sync_globs && other->deleted) {
 			char* cur = other->deleted;
 			while (*cur) {
 				unset(CTX, cur);
