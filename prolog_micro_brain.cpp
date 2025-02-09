@@ -608,7 +608,8 @@ bool context::join(int K, frame_item* f, interpreter* INTRP) {
 	names = lnames[CONTEXTS.size() - 1];
 
 	do {
-		vector<bool> stoppeds(CONTEXTS.size());
+		vector<bool> stoppeds(CONTEXTS.size(), false);
+		vector<bool> rollback(CONTEXTS.size(), false);
 		int stopped = std::count(joineds.begin(), joineds.end(), true);
 		bool mainlined = !joineds[CONTEXTS.size() - 1];
 		if (mainlined) {
@@ -620,15 +621,19 @@ bool context::join(int K, frame_item* f, interpreter* INTRP) {
 		while (stopped < CONTEXTS.size()) {
 			for (int i = 0; i < CONTEXTS.size(); i++)
 				if (!joineds[i] && !stoppeds[i] && CONTEXTS[i]->THR->is_stopped()) {
-					stoppeds[i] = true;
-					CONTEXTS[i]->FRAME.load()->add_local_names(CONTEXTS[i]->locals_in_forked, lnames[i]);
-					if (CONTEXTS[i]->transactable_facts)
-						CONTEXTS[i]->FRAME.load()->register_facts(CONTEXTS[i], lnames[i]);
-					names.insert(lnames[i].begin(), lnames[i].end());
+					rollback[i] = CONTEXTS[i]->rollback;
+					stoppeds[i] = !rollback[i];
+					if (stoppeds[i]) {
+						CONTEXTS[i]->FRAME.load()->add_local_names(CONTEXTS[i]->locals_in_forked, lnames[i]);
+						if (CONTEXTS[i]->transactable_facts)
+							CONTEXTS[i]->FRAME.load()->register_facts(CONTEXTS[i], lnames[i]);
+						names.insert(lnames[i].begin(), lnames[i].end());
+					}
 					stopped++;
 				}
 			std::this_thread::yield();
 		}
+		stopped -= std::count(rollback.begin(), rollback.end(), true);
 		// In not joineds search for winners
 		vector<vector<int>> M(CONTEXTS.size(), vector<int>(CONTEXTS.size(), 0));
 		std::set<string> conflictors;
@@ -702,11 +707,12 @@ bool context::join(int K, frame_item* f, interpreter* INTRP) {
 					if (i != j && stoppeds[j] && conflicted.find(j) == conflicted.end())
 						parallels.insert(j);
 				}
+				int candidate = i;
 				if (parallels.size() > 1) {
-					int candidate = *parallels.begin();
 					clock_t min_time = 0;
+					if (!mainlined) parallels.insert(i);
 					for (const string& vname : names) {
-						for (int j : parallels)
+						for (int j : parallels) {
 							if (stoppeds[j] && lnames[j].find(vname) != lnames[j].end()) {
 								clock_t cr, fw, fr, lw, lr;
 								CONTEXTS[j]->FRAME.load()->statistics(vname, cr, fw, fr, lw, lr);
@@ -715,18 +721,30 @@ bool context::join(int K, frame_item* f, interpreter* INTRP) {
 									min_time = fw;
 								}
 							}
+						}
 					}
+					if (!mainlined) parallels.erase(i);
 					for (int j = 0; j < CONTEXTS.size(); j++)
 						for (int k = j + 1; k < CONTEXTS.size(); k++)
 							if (M[j][k]) {
 								parallels.erase(j);
 								parallels.erase(k);
 							}
+				}
+				if (mainlined) {
 					parallels.insert(candidate);
+					parallels.erase(i);
+					parallels.insert(-i);
+					candidate = i;
+				}
+				else {
+					parallels.insert(i);
+					parallels.erase(candidate);
+					parallels.insert(-candidate);
 				}
 				if (parallels.size() > other_winners.size()) {
 					other_winners = parallels;
-					first_winner = i;
+					first_winner = candidate;
 				}
 			}
 		if (first_winner < 0) {
@@ -745,18 +763,24 @@ bool context::join(int K, frame_item* f, interpreter* INTRP) {
 			for (int i = 0; first_winner < 0 && i < CONTEXTS.size(); i++)
 				if (stoppeds[i])
 					first_winner = i;
+			if (first_winner >= 0) {
+				other_winners.erase(first_winner);
+				other_winners.insert(-first_winner);
+			}
 		}
 		f->unregister_facts(this);
-		if (!mainlined)
-			other_winners.insert(first_winner);
-		else {
+		if (mainlined)
+		{
+			other_winners.erase(first_winner);
+			other_winners.erase(-first_winner);
 			joineds[CONTEXTS.size() - 1] = true;
 			stoppeds[CONTEXTS.size() - 1] = false;
 			success++;
 			joined++;
 		}
 		// Set vars by threads with non-zero first_writes
-		for (int winner : other_winners)
+		for (int _winner : other_winners) {
+			int winner = abs(_winner);
 			for (const string& vname : names)
 				if (lnames[winner].find(vname) != lnames[winner].end() && CONTEXTS[winner]->FRAME.load()->first_write(vname))
 				{
@@ -806,10 +830,11 @@ bool context::join(int K, frame_item* f, interpreter* INTRP) {
 								f->set(this, vname.c_str(), cur);
 					}
 				}
+		}
 		// Join first_winner && other_winners
 		for (int i = 0; i < CONTEXTS.size(); i++)
-			if (stoppeds[i]) {
-				if (other_winners.find(i) == other_winners.end()) {
+			if (stoppeds[i] || rollback[i]) {
+				if (other_winners.find(i) == other_winners.end() && other_winners.find(-i) == other_winners.end()) {
 					tframe_item* OLD = CONTEXTS[i]->FRAME.load();
 					if (CONTEXTS[i]->transactable_facts) { // Undo facts
 						std::unique_lock<std::mutex> lock(*DBLOCK);
@@ -840,6 +865,7 @@ bool context::join(int K, frame_item* f, interpreter* INTRP) {
 						lock.unlock();
 					}
 					CONTEXTS[i]->FRAME.store(f->tcopy(this, INTRP, false));
+					CONTEXTS[i]->set_rollback(false);
 					CONTEXTS[i]->THR->set_stopped(false);
 				}
 				else {
@@ -923,6 +949,55 @@ void tthread::body() {
 		while (is_stopped())
 			std::this_thread::yield();
 	} while (!terminated.test_and_set());
+}
+
+void context::register_db_read(const std::string& iid) {
+	map<string, journal*>::iterator it = DBJournal->find(iid);
+	if (it == DBJournal->end()) {
+		(*DBJournal)[iid] = new journal();
+		it = DBJournal->find(iid);
+	}
+	it->second->register_read();
+}
+
+void context::register_db_write(const std::string& iid, jTypes t, value* data, int position) {
+	map<string, journal*>::iterator it = DBJournal->find(iid);
+	if (it == DBJournal->end()) {
+		(*DBJournal)[iid] = new journal();
+		it = DBJournal->find(iid);
+	}
+	it->second->register_write(t, data, position);
+}
+
+void tframe_item::register_fact_group(context* CTX, string& fact, journal* J) {
+	bool locked = mutex.try_lock();
+	bool found = false;
+	fact.insert(0, 1, '!');
+	int it = find(fact.c_str(), found);
+	if (!found) {
+		set(CTX, fact.c_str(), NULL);
+		it = find(fact.c_str(), found);
+	}
+	if (!first_writes[it] || first_writes[it] > J->first_write)
+		first_writes[it] = J->first_write;
+	if (!last_writes[it] || last_writes[it] < J->last_write)
+		last_writes[it] = J->last_write;
+	if (!first_reads[it] || first_reads[it] > J->first_read)
+		first_reads[it] = J->first_read;
+	if (!last_reads[it] || last_reads[it] < J->last_read)
+		last_reads[it] = J->last_read;
+	if (locked) mutex.unlock();
+}
+
+void tframe_item::unregister_fact_group(context* CTX, string& fact) {
+	bool locked = mutex.try_lock();
+	bool found = false;
+	fact.insert(0, 1, '!');
+	int it = find(fact.c_str(), found);
+	if (found)
+		unset(CTX, fact.c_str());
+
+	if (locked) mutex.unlock();
 }
 
 class string_atomizer {
@@ -6936,6 +7011,35 @@ public:
 	}
 };
 
+class predicate_item_rollback : public predicate_item {
+public:
+	predicate_item_rollback(bool _neg, bool _once, bool _call, int num, clause* c, interpreter* _prolog) :
+		predicate_item(_neg, _once, _call, num, c, _prolog) { }
+
+	virtual const string get_id() { return "rollback"; }
+
+	virtual generated_vars* generate_variants(context* CTX, frame_item* f, vector<value*>*& positional_vals) {
+		if (positional_vals->size() != 0) {
+			std::cout << "rollback incorrect call!" << endl;
+			exit(-3);
+		}
+
+		generated_vars* result = new generated_vars();
+
+		frame_item* ff = f->copy(CTX);
+		result->push_back(ff);
+
+		return result;
+	}
+
+	virtual bool execute(context* CTX, frame_item* f) {
+		if (CTX)
+			CTX->set_rollback(true);
+		// Process
+		return true;
+	}
+};
+
 void interpreter::block_process(context * CNT, bool clear_flag, bool cut_flag, predicate_item * frontier) {
 	std::list<int>::iterator itf = CNT->FLAGS.end();
 	bool passed_frontier = false;
@@ -8212,257 +8316,270 @@ void interpreter::parse_clause(context * CTX, vector<string> & renew, frame_item
 							pi->add_arg(expr);
 						}
 					}
-					else if (iid == "append") {
-						pi = new predicate_item_append(neg, once, call, num, cl, this);
-					}
-					else if (iid == "sublist") {
-						pi = new predicate_item_sublist(neg, once, call, num, cl, this);
-					}
-					else if (iid == "delete") {
-						pi = new predicate_item_delete(neg, once, call, num, cl, this);
-					}
-					else if (iid == "member") {
-						pi = new predicate_item_member(neg, once, call, num, cl, this);
-					}
-					else if (iid == "last") {
-						pi = new predicate_item_last(neg, once, call, num, cl, this);
-					}
-					else if (iid == "reverse") {
-						pi = new predicate_item_reverse(neg, once, call, num, cl, this);
-					}
-					else if (iid == "for") {
-						pi = new predicate_item_for(neg, once, call, num, cl, this);
-					}
-					else if (iid == "length") {
-						pi = new predicate_item_length(neg, once, call, num, cl, this);
-					}
-					else if (iid == "max_list") {
-						pi = new predicate_item_max_list(neg, once, call, num, cl, this);
-					}
-					else if (iid == "atom_length") {
-						pi = new predicate_item_atom_length(neg, once, call, num, cl, this);
-					}
-					else if (iid == "nth") {
-						pi = new predicate_item_nth(neg, once, call, num, cl, this);
-					}
-					else if (iid == "page_id") {
-						pi = new predicate_item_page_id(neg, once, call, num, cl, this);
-					}
-					else if (iid == "thread_id") {
-						pi = new predicate_item_thread_id(neg, once, call, num, cl, this);
-					}
-					else if (iid == "atom_concat") {
-						pi = new predicate_item_atom_concat(neg, once, call, num, cl, this);
-					}
-					else if (iid == "atom_chars") {
-						pi = new predicate_item_atom_chars(neg, once, call, num, cl, this);
-					}
-					else if (iid == "atom_codes") {
-						pi = new predicate_item_atom_codes(neg, once, call, num, cl, this);
-					}
-					else if (iid == "atom_hex") {
-						pi = new predicate_item_atom_hex(0, neg, once, call, num, cl, this);
-					}
-					else if (iid == "atom_hexs") {
-						pi = new predicate_item_atom_hex(' ', neg, once, call, num, cl, this);
-					}
-					else if (iid == "number_atom") {
-						pi = new predicate_item_number_atom(neg, once, call, num, cl, this);
-					}
-					else if (iid == "number") {
-						pi = new predicate_item_number(neg, once, call, num, cl, this);
-					}
-					else if (iid == "consistency") {
-						pi = new predicate_item_consistency(neg, once, call, num, cl, this);
-					}
-					else if (iid == "listing") {
-						pi = new predicate_item_listing(neg, once, call, num, cl, this);
-					}
-					else if (iid == "current_predicate") {
-						pi = new predicate_item_current_predicate(neg, once, call, num, cl, this);
-					}
-					else if (iid == "findall") {
-						pi = new predicate_item_findall(neg, once, call, num, cl, this);
-					}
-					else if (iid == "functor") {
-						pi = new predicate_item_functor(neg, once, call, num, cl, this);
-					}
-					else if (iid == "predicate_property") {
-						pi = new predicate_item_predicate_property(neg, once, call, num, cl, this);
-					}
-					else if (iid == "$predicate_property_pi") {
-						pi = new predicate_item_predicate_property_pi(neg, once, call, num, cl, this);
-					}
-					else if (iid == "eq" || iid == "=") {
-						pi = new predicate_item_eq(neg, once, call, num, cl, this);
-					}
-					else if (iid == "neq" || iid == "\\=") {
-						pi = new predicate_item_neq(neg, once, call, num, cl, this);
-					}
-					else if (iid == "less" || iid == "<") {
-						pi = new predicate_item_less(neg, once, call, num, cl, this);
-					}
-					else if (iid == "greater" || iid == ">") {
-						pi = new predicate_item_greater(neg, once, call, num, cl, this);
-					}
-					else if (iid == "term_split" || iid == "..") {
-						pi = new predicate_item_term_split(neg, once, call, num, cl, this);
-					}
-					else if (iid == "g_assign") {
-						pi = new predicate_item_g_assign(neg, once, call, num, cl, this);
-					}
-					else if (iid == "g_assign_nth") {
-						pi = new predicate_item_g_assign_nth(neg, once, call, num, cl, this);
-					}
-					else if (iid == "g_read") {
-						pi = new predicate_item_g_read(neg, once, call, num, cl, this);
-					}
-					else if (iid == "fail") {
-						pi = new predicate_item_fail(neg, once, call, num, cl, this);
-					}
-					else if (iid == "true") {
-						pi = new predicate_item_true(neg, once, call, num, cl, this);
-					}
-					else if (iid == "change_directory") {
-						pi = new predicate_item_change_directory(neg, once, call, num, cl, this);
-					}
-					else if (iid == "open") {
-						pi = new predicate_item_open(neg, once, call, num, cl, this);
-					}
-					else if (iid == "close") {
-						pi = new predicate_item_close(neg, once, call, num, cl, this);
-					}
-					else if (iid == "get_char") {
-						pi = new predicate_item_get_or_peek_char(false, neg, once, call, num, cl, this);
-					}
-					else if (iid == "peek_char") {
-						pi = new predicate_item_get_or_peek_char(true, neg, once, call, num, cl, this);
-					}
-					else if (iid == "read_token") {
-						pi = new predicate_item_read_token(neg, once, call, num, cl, this);
-					}
-					else if (iid == "read_token_from_atom") {
-						pi = new predicate_item_read_token_from_atom(neg, once, call, num, cl, this);
-					}
-					else if (iid == "mars") {
-						pi = new predicate_item_mars(neg, once, call, num, cl, this);
-					}
-					else if (iid == "mars_decode") {
-						pi = new predicate_item_mars_decode(neg, once, call, num, cl, this);
-					}
-					else if (iid == "unset") {
-						pi = new predicate_item_unset(neg, once, call, num, cl, this);
-					}
-					else if (iid == "write") {
-						pi = new predicate_item_write(neg, once, call, num, cl, this);
-						}
-					else if (iid == "write_to_atom") {
-						pi = new predicate_item_write_to_atom(neg, once, call, num, cl, this);
-					}
-					else if (iid == "write_term") {
-						pi = new predicate_item_write_term(neg, once, call, num, cl, this);
-					}
-					else if (iid == "write_term_to_atom") {
-						pi = new predicate_item_write_term_to_atom(neg, once, call, num, cl, this);
-					}
-					else if (iid == "nl") {
-						pi = new predicate_item_nl(neg, once, call, num, cl, this);
-					}
-					else if (iid == "file_exists") {
-						pi = new predicate_item_file_exists(neg, once, call, num, cl, this);
-					}
-					else if (iid == "unlink") {
-						pi = new predicate_item_unlink(neg, once, call, num, cl, this);
-					}
-					else if (iid == "rename_file") {
-						pi = new predicate_item_rename_file(neg, once, call, num, cl, this);
-					}
-					else if (iid == "seeing") {
-						pi = new predicate_item_seeing(neg, once, call, num, cl, this);
-					}
-					else if (iid == "telling") {
-						pi = new predicate_item_telling(neg, once, call, num, cl, this);
-					}
-					else if (iid == "seen") {
-						pi = new predicate_item_seen(neg, once, call, num, cl, this);
-					}
-					else if (iid == "told") {
-						pi = new predicate_item_told(neg, once, call, num, cl, this);
-					}
-					else if (iid == "see") {
-						pi = new predicate_item_see(neg, once, call, num, cl, this);
-					}
-					else if (iid == "tell") {
-						pi = new predicate_item_tell(neg, once, call, num, cl, this);
-					}
-					else if (iid == "random") {
-						pi = new predicate_item_random(neg, once, call, num, cl, this);
-					}
-					else if (iid == "randomize") {
-						pi = new predicate_item_randomize(neg, once, call, num, cl, this);
-					}
-					else if (iid == "char_code") {
-						pi = new predicate_item_char_code(neg, once, call, num, cl, this);
-					}
-					else if (iid == "get_code") {
-						pi = new predicate_item_get_code(neg, once, call, num, cl, this);
-					}
-					else if (iid == "at_end_of_stream") {
-						pi = new predicate_item_at_end_of_stream(neg, once, call, num, cl, this);
-					}
-					else if (iid == "open_url") {
-						pi = new predicate_item_open_url(neg, once, call, num, cl, this);
-					}
-					else if (iid == "track_post") {
-						pi = new predicate_item_track_post(neg, once, call, num, cl, this);
-					}
-					else if (iid == "consult") {
-						pi = new predicate_item_consult(neg, once, call, num, cl, this);
-					}
-					else if (iid == "assert" || iid == "asserta" || iid == "assertz") {
-						pi = new predicate_item_assert(iid != "asserta", neg, once, call, num, cl, this);
-					}
-					else if (iid == "retract") {
-						pi = new predicate_item_retract(false, neg, once, call, num, cl, this);
-					}
-					else if (iid == "retractall") {
-						pi = new predicate_item_retract(true, neg, once, call, num, cl, this);
-					}
-					else if (iid == "inc") {
-						pi = new predicate_item_inc(neg, once, call, num, cl, this);
-					}
-					else if (iid == "halt") {
-						exit(0);
-					}
-					else if (iid == "load_classes") {
-						pi = new predicate_item_load_classes(neg, once, call, num, cl, this);
-					}
-					else if (iid == "init_xpathing") {
-						pi = new predicate_item_init_xpathing(neg, once, call, num, cl, this);
-					}
-					else if (iid == "induct_xpathing") {
-						pi = new predicate_item_induct_xpathing(neg, once, call, num, cl, this);
-					}
-					else if (iid == "import_model_after_induct") {
-						pi = new predicate_item_import_model_after_induct(neg, once, call, num, cl, this);
-					}
-					else if (iid == "unload_classes") {
-						pi = new predicate_item_unload_classes(neg, once, call, num, cl, this);
-					}
-					else if (iid == "var") {
-						pi = new predicate_item_var(neg, once, call, num, cl, this);
-					}
-					else if (iid == "nonvar") {
-						pi = new predicate_item_nonvar(neg, once, call, num, cl, this);
-					}
-					else if (iid == "get_icontacts") {
-						pi = new predicate_item_get_contacts(dirInput, neg, once, call, num, cl, this);
-					}
-					else if (iid == "get_ocontacts") {
-						pi = new predicate_item_get_contacts(dirOutput, neg, once, call, num, cl, this);
-					}
 					else {
-						pi = new predicate_item_user(neg, once, call, num, cl, this, iid);
+						map<string, ids>::iterator id = MAP.find(iid);
+						if (id == MAP.end()) {
+							pi = new predicate_item_user(neg, once, call, num, cl, this, iid);
+						}
+						else {
+							ids _iid = id->second;
+							if (_iid == id_append) {
+								pi = new predicate_item_append(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_sublist) {
+								pi = new predicate_item_sublist(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_delete) {
+								pi = new predicate_item_delete(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_member) {
+								pi = new predicate_item_member(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_last) {
+								pi = new predicate_item_last(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_reverse) {
+								pi = new predicate_item_reverse(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_for) {
+								pi = new predicate_item_for(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_length) {
+								pi = new predicate_item_length(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_max_list) {
+								pi = new predicate_item_max_list(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_atom_length) {
+								pi = new predicate_item_atom_length(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_nth) {
+								pi = new predicate_item_nth(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_page_id) {
+								pi = new predicate_item_page_id(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_thread_id) {
+								pi = new predicate_item_thread_id(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_atom_concat) {
+								pi = new predicate_item_atom_concat(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_atom_chars) {
+								pi = new predicate_item_atom_chars(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_atom_codes) {
+								pi = new predicate_item_atom_codes(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_atom_hex) {
+								pi = new predicate_item_atom_hex(0, neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_atom_hexs) {
+								pi = new predicate_item_atom_hex(' ', neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_number_atom) {
+								pi = new predicate_item_number_atom(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_number) {
+								pi = new predicate_item_number(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_consistency) {
+								pi = new predicate_item_consistency(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_listing) {
+								pi = new predicate_item_listing(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_current_predicate) {
+								pi = new predicate_item_current_predicate(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_findall) {
+								pi = new predicate_item_findall(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_functor) {
+								pi = new predicate_item_functor(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_predicate_property) {
+								pi = new predicate_item_predicate_property(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_spredicate_property_pi) {
+								pi = new predicate_item_predicate_property_pi(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_eq) {
+								pi = new predicate_item_eq(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_neq) {
+								pi = new predicate_item_neq(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_less) {
+								pi = new predicate_item_less(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_greater) {
+								pi = new predicate_item_greater(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_term_split) {
+								pi = new predicate_item_term_split(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_g_assign) {
+								pi = new predicate_item_g_assign(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_g_assign_nth) {
+								pi = new predicate_item_g_assign_nth(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_g_read) {
+								pi = new predicate_item_g_read(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_fail) {
+								pi = new predicate_item_fail(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_true) {
+								pi = new predicate_item_true(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_change_directory) {
+								pi = new predicate_item_change_directory(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_open) {
+								pi = new predicate_item_open(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_close) {
+								pi = new predicate_item_close(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_get_char) {
+								pi = new predicate_item_get_or_peek_char(false, neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_peek_char) {
+								pi = new predicate_item_get_or_peek_char(true, neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_read_token) {
+								pi = new predicate_item_read_token(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_read_token_from_atom) {
+								pi = new predicate_item_read_token_from_atom(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_mars) {
+								pi = new predicate_item_mars(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_mars_decode) {
+								pi = new predicate_item_mars_decode(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_unset) {
+								pi = new predicate_item_unset(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_write) {
+								pi = new predicate_item_write(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_write_to_atom) {
+								pi = new predicate_item_write_to_atom(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_write_term) {
+								pi = new predicate_item_write_term(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_write_term_to_atom) {
+								pi = new predicate_item_write_term_to_atom(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_nl) {
+								pi = new predicate_item_nl(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_file_exists) {
+								pi = new predicate_item_file_exists(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_unlink) {
+								pi = new predicate_item_unlink(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_rename_file) {
+								pi = new predicate_item_rename_file(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_seeing) {
+								pi = new predicate_item_seeing(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_telling) {
+								pi = new predicate_item_telling(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_seen) {
+								pi = new predicate_item_seen(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_told) {
+								pi = new predicate_item_told(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_see) {
+								pi = new predicate_item_see(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_tell) {
+								pi = new predicate_item_tell(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_random) {
+								pi = new predicate_item_random(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_randomize) {
+								pi = new predicate_item_randomize(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_char_code) {
+								pi = new predicate_item_char_code(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_get_code) {
+								pi = new predicate_item_get_code(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_at_end_of_stream) {
+								pi = new predicate_item_at_end_of_stream(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_open_url) {
+								pi = new predicate_item_open_url(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_track_post) {
+								pi = new predicate_item_track_post(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_consult) {
+								pi = new predicate_item_consult(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_assert || _iid == id_asserta || _iid == id_assertz) {
+								pi = new predicate_item_assert(_iid != id_asserta, neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_retract) {
+								pi = new predicate_item_retract(false, neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_retractall) {
+								pi = new predicate_item_retract(true, neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_inc) {
+								pi = new predicate_item_inc(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_halt) {
+								exit(0);
+							}
+							else if (_iid == id_load_classes) {
+								pi = new predicate_item_load_classes(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_init_xpathing) {
+								pi = new predicate_item_init_xpathing(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_induct_xpathing) {
+								pi = new predicate_item_induct_xpathing(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_import_model_after_induct) {
+								pi = new predicate_item_import_model_after_induct(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_unload_classes) {
+								pi = new predicate_item_unload_classes(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_var) {
+								pi = new predicate_item_var(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_nonvar) {
+								pi = new predicate_item_nonvar(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_get_icontacts) {
+								pi = new predicate_item_get_contacts(dirInput, neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_get_ocontacts) {
+								pi = new predicate_item_get_contacts(dirOutput, neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_rollback) {
+								pi = new predicate_item_rollback(neg, once, call, num, cl, this);
+							}
+							else {
+								cout << "Unmapped construction : " << iid << "!" << endl;
+								exit(1730);
+							}
+						}
 					}
 
 					if (p < s.length() && s[p] == '(') {
@@ -8709,7 +8826,103 @@ interpreter::interpreter(const string & fname, const string & starter_name) {
 	outs = &std::cout;
 	xpathInductLib = 0;
 
+	env[0] = 0;
+	xpath_compiled = false;
+	xpath_loaded = false;
+
 	forking = false;
+
+	MAP["append"] = id_append;
+	MAP["sublist"] = id_sublist;
+	MAP["delete"] = id_delete;
+	MAP["member"] = id_member;
+	MAP["last"] = id_last;
+	MAP["reverse"] = id_reverse;
+	MAP["for"] = id_for;
+	MAP["length"] = id_length;
+	MAP["max_list"] = id_max_list;
+	MAP["atom_length"] = id_atom_length;
+	MAP["nth"] = id_nth;
+	MAP["page_id"] = id_page_id;
+	MAP["thread_id"] = id_thread_id;
+	MAP["atom_concat"] = id_atom_concat;
+	MAP["atom_chars"] = id_atom_chars;
+	MAP["atom_codes"] = id_atom_codes;
+	MAP["atom_hex"] = id_atom_hex;
+	MAP["atom_hexs"] = id_atom_hexs;
+	MAP["number_atom"] = id_number_atom;
+	MAP["number"] = id_number;
+	MAP["consistency"] = id_consistency;
+	MAP["listing"] = id_listing;
+	MAP["current_predicate"] = id_current_predicate;
+	MAP["findall"] = id_findall;
+	MAP["functor"] = id_functor;
+	MAP["predicate_property"] = id_predicate_property;
+	MAP["$predicate_property_pi"] = id_spredicate_property_pi;
+	MAP["eq"] = id_eq;
+	MAP["="] = id_eq;
+	MAP["neq"] = id_neq;
+	MAP["\\="] = id_neq;
+	MAP["less"] = id_less;
+	MAP["<"] = id_less;
+	MAP["greater"] = id_greater;
+	MAP[">"] = id_greater;
+	MAP["term_split"] = id_term_split;
+	MAP[".."] = id_term_split;
+	MAP["g_assign"] = id_g_assign;
+	MAP["g_assign_nth"] = id_g_assign_nth;
+	MAP["g_read"] = id_g_read;
+	MAP["fail"] = id_fail;
+	MAP["true"] = id_true;
+	MAP["change_directory"] = id_change_directory;
+	MAP["open"] = id_open;
+	MAP["close"] = id_close;
+	MAP["get_char"] = id_get_char;
+	MAP["peek_char"] = id_peek_char;
+	MAP["read_token"] = id_read_token;
+	MAP["read_token_from_atom"] = id_read_token_from_atom;
+	MAP["mars"] = id_mars;
+	MAP["mars_decode"] = id_mars_decode;
+	MAP["unset"] = id_unset;
+	MAP["write"] = id_write;
+	MAP["write_to_atom"] = id_write_to_atom;
+	MAP["write_term"] = id_write_term;
+	MAP["write_term_to_atom"] = id_write_term_to_atom;
+	MAP["nl"] = id_nl;
+	MAP["file_exists"] = id_file_exists;
+	MAP["unlink"] = id_unlink;
+	MAP["rename_file"] = id_rename_file;
+	MAP["seeing"] = id_seeing;
+	MAP["telling"] = id_telling;
+	MAP["seen"] = id_seen;
+	MAP["told"] = id_told;
+	MAP["see"] = id_see;
+	MAP["tell"] = id_tell;
+	MAP["random"] = id_random;
+	MAP["randomize"] = id_randomize;
+	MAP["char_code"] = id_char_code;
+	MAP["get_code"] = id_get_code;
+	MAP["at_end_of_stream"] = id_at_end_of_stream;
+	MAP["open_url"] = id_open_url;
+	MAP["track_post"] = id_track_post;
+	MAP["consult"] = id_consult;
+	MAP["assert"] = id_assert;
+	MAP["asserta"] = id_asserta;
+	MAP["assertz"] = id_assertz;
+	MAP["retract"] = id_retract;
+	MAP["retractall"] = id_retractall;
+	MAP["inc"] = id_inc;
+	MAP["halt"] = id_halt;
+	MAP["load_classes"] = id_load_classes;
+	MAP["init_xpathing"] = id_init_xpathing;
+	MAP["induct_xpathing"] = id_induct_xpathing;
+	MAP["import_model_after_induct"] = id_import_model_after_induct;
+	MAP["unload_classes"] = id_unload_classes;
+	MAP["var"] = id_var;
+	MAP["nonvar"] = id_nonvar;
+	MAP["get_icontacts"] = id_get_icontacts;
+	MAP["get_ocontacts"] = id_get_ocontacts;
+	MAP["rollback"] = id_rollback;
 
 	CONTEXT = new context(false, false, NULL, 50000, NULL, NULL, NULL, NULL, this);
 
@@ -8886,7 +9099,7 @@ int main(int argc, char ** argv) {
 		main_part++;
 	}
 
-	std::cout << "Prolog MicroBrain by V.V.Pekunov V0.23beta1" << endl;
+	std::cout << "Prolog MicroBrain by V.V.Pekunov V0.23beta3" << endl;
 	if (argc == main_part) {
 		interpreter prolog("", "");
 		std::cout << "  Enter 'halt.' or 'end_of_file' to exit." << endl << endl;

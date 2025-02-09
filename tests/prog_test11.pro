@@ -45,7 +45,7 @@
 	run7 :- {{for(A, 1, 1000000), fail},{for(B, 1, 1000000), fail},{=0}}{{for(A, 1, 1000000), fail},{for(B, 1, 1000000), fail},{=0}},
 		{&}.
 
-	run8 :- {(for(M,1,1000),fail;true),g_assign('m',5),g_read('m',A),write(A)}{g_assign('m',6),g_read('m',B),write(B)},
+	run8 :- {(for(M,1,1000),fail;true),g_assign('m',5),write('1='),g_read('m',A),write(A)}{g_assign('m',6),write('2='),g_read('m',B),write(B)},
 		{&},
 		g_read('m',X),
 		write(X).
@@ -68,6 +68,22 @@
 		write(X).
 
 	run16 :- =(C,1),{=(B,1),{{{{=(A,2)}}}},(run6;true),{&}},=(D,1),{&},write(A),write(B),write(C),write(D).
+
+	run17 :- g_assign('&A',0), *{g_read('&A',A), write(A), B is A+1, g_assign('&A',B), =(B,5); rollback}, {&}.
+
+	run18 :- retractall(a(_)), !{(for(M,1,1000),fail;true),asserta(a(1)),write(1)},!{asserta(a(2)),write(2),asserta(s(1))},{&},
+		 nl,
+		 a(A),
+		 write(A),
+		 fail;
+		 true.
+
+	run19 :- retractall(a(_)), !{(for(M,1,1000),fail;true),asserta(a(1)),write(1)},!{retractall(a(3)),asserta(a(2)),write(2)},{&},
+		 nl,
+		 a(A),
+		 write(A),
+		 fail;
+		 true.
 
 	generate_facts(This,N):-
 		>(This,N),

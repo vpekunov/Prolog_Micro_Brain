@@ -118,6 +118,8 @@ public:
 			DBJournal = new map<string, journal*>();
 		}
 
+		rollback = false;
+
 		CALLS.reserve(RESERVE);
 		FRAMES.reserve(RESERVE);
 		CTXS.reserve(RESERVE);
@@ -172,6 +174,10 @@ public:
 		return result;
 	}
 
+	virtual void set_rollback(bool val) {
+		rollback = val;
+	}
+
 	context* parent;
 	interpreter* prolog;
 	predicate_item* forker;
@@ -179,6 +185,7 @@ public:
 	predicate_item* ending;
 	bool locals_in_forked;
 	bool transactable_facts;
+	bool rollback;
 
 	std::mutex * DBLOCK;
 	map< string, vector<term*>*> * DB;
@@ -224,6 +231,97 @@ private:
 
 	bool forking;
 public:
+	typedef enum {
+		id_append = 0,
+		id_sublist,
+		id_delete,
+		id_member,
+		id_last,
+		id_reverse,
+		id_for,
+		id_length,
+		id_max_list,
+		id_atom_length,
+		id_nth,
+		id_page_id,
+		id_thread_id,
+		id_atom_concat,
+		id_atom_chars,
+		id_atom_codes,
+		id_atom_hex,
+		id_atom_hexs,
+		id_number_atom,
+		id_number,
+		id_consistency,
+		id_listing,
+		id_current_predicate,
+		id_findall,
+		id_functor,
+		id_predicate_property,
+		id_spredicate_property_pi,
+		id_eq,
+		id_neq,
+		id_less,
+		id_greater,
+		id_term_split,
+		id_g_assign,
+		id_g_assign_nth,
+		id_g_read,
+		id_fail,
+		id_true,
+		id_change_directory,
+		id_open,
+		id_close,
+		id_get_char,
+		id_peek_char,
+		id_read_token,
+		id_read_token_from_atom,
+		id_mars,
+		id_mars_decode,
+		id_unset,
+		id_write,
+		id_write_to_atom,
+		id_write_term,
+		id_write_term_to_atom,
+		id_nl,
+		id_file_exists,
+		id_unlink,
+		id_rename_file,
+		id_seeing,
+		id_telling,
+		id_seen,
+		id_told,
+		id_see,
+		id_tell,
+		id_random,
+		id_randomize,
+		id_char_code,
+		id_get_code,
+		id_at_end_of_stream,
+		id_open_url,
+		id_track_post,
+		id_consult,
+		id_assert,
+		id_asserta,
+		id_assertz,
+		id_retract,
+		id_retractall,
+		id_inc,
+		id_halt,
+		id_load_classes,
+		id_init_xpathing,
+		id_induct_xpathing,
+		id_import_model_after_induct,
+		id_unload_classes,
+		id_var,
+		id_nonvar,
+		id_get_icontacts,
+		id_get_ocontacts,
+		id_rollback
+	} ids;
+
+	map<string, ids> MAP;
+
 	string CLASSES_ROOT;
 	string INDUCT_MODE;
 
@@ -1153,54 +1251,5 @@ public:
 		log.push_back(new journal_item(t, data, position));
 	}
 };
-
-void context::register_db_read(const std::string& iid) {
-	map<string, journal*>::iterator it = DBJournal->find(iid);
-	if (it == DBJournal->end()) {
-		(*DBJournal)[iid] = new journal();
-		it = DBJournal->find(iid);
-	}
-	it->second->register_read();
-}
-
-void context::register_db_write(const std::string& iid, jTypes t, value* data, int position) {
-	map<string, journal*>::iterator it = DBJournal->find(iid);
-	if (it == DBJournal->end()) {
-		(*DBJournal)[iid] = new journal();
-		it = DBJournal->find(iid);
-	}
-	it->second->register_write(t, data, position);
-}
-
-void tframe_item::register_fact_group(context* CTX, string & fact, journal* J) {
-	bool locked = mutex.try_lock();
-	bool found = false;
-	fact.insert(0, 1, '!');
-	int it = find(fact.c_str(), found);
-	if (!found) {
-		set(CTX, fact.c_str(), NULL);
-		it = find(fact.c_str(), found);
-	}
-	if (!first_writes[it] || first_writes[it] > J->first_write)
-		first_writes[it] = J->first_write;
-	if (!last_writes[it] || last_writes[it] < J->last_write)
-		last_writes[it] = J->last_write;
-	if (!first_reads[it] || first_reads[it] > J->first_read)
-		first_reads[it] = J->first_read;
-	if (!last_reads[it] || last_reads[it] < J->last_read)
-		last_reads[it] = J->last_read;
-	if (locked) mutex.unlock();
-}
-
-void tframe_item::unregister_fact_group(context* CTX, string & fact) {
-	bool locked = mutex.try_lock();
-	bool found = false;
-	fact.insert(0, 1, '!');
-	int it = find(fact.c_str(), found);
-	if (found)
-		unset(CTX, fact.c_str());
-
-	if (locked) mutex.unlock();
-}
 
 #endif
