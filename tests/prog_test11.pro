@@ -109,6 +109,8 @@
 
 	run26 :- {*member(A,[1,2,3]){{write(A)},{&}}},{&}.
 
+	run27 :- asserta(num(x)),retractall(num(_)),*member(A,[1,2,3,4,5]){asserta(num(A)),A>3},num(X),write(X),fail.
+
 	generate_facts(This,N):-
 		>(This,N),
 		!.
