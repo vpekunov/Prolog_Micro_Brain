@@ -16,7 +16,7 @@
 		g_read('&res',R),
 		write(R).
 
-	run21 :-
+	run2__ :-
 		g_assign('res',[_,_,_,_,_]),
 		{page_id(A), B is A+1, g_assign_nth('res',B,A), unset('A'), unset('B')}*5, {&},
 		g_read('res',R),
@@ -84,6 +84,30 @@
 		 write(A),
 		 fail;
 		 true.
+
+	run20 :- member(A,[1,2,3,4,5]), { write(A) }, fail; {&}.
+
+	run21 :- *for(I,1,20){write(I),(*for(A,1,3){write(x),fail};true)}.
+
+	run22 :- *for(I,1,20){write(I)}.
+
+	run23a(1) :- write(a).
+	run23a(3) :- fail.
+	run23a(4) :- member(_,[1,2]).
+	run23a(2) :- write(b).
+
+	run23 :- *run23a(A){write(A)}.
+
+	run24a :- fail.
+
+	run24 :- *run24a(A){write(A)}.
+
+	repeat.
+	repeat:-repeat.
+
+	run25 :- *repeat{write(x)}.
+
+	run26 :- {*member(A,[1,2,3]){{write(A)},{&}}},{&}.
 
 	generate_facts(This,N):-
 		>(This,N),
