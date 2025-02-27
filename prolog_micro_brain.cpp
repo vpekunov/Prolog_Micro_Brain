@@ -1670,6 +1670,11 @@ context::context(bool locals_in_forked, bool transactable_facts, predicate_item*
 	this->locals_in_forked = locals_in_forked;
 	this->transactable_facts = transactable_facts;
 
+	if (tframe && parent)
+		INIT = tframe->tcopy(parent, prolog);
+	else
+		INIT = NULL;
+
 	if (!transactable_facts && parent != NULL) {
 		DBLOCK = parent->DBLOCK;
 		DB = parent->DB;
@@ -1691,7 +1696,7 @@ context::context(bool locals_in_forked, bool transactable_facts, predicate_item*
 			}
 			lock.unlock();
 		}
-		DBJournal = new map<string, journal*>();
+		DBJournal = new map<string, std::atomic<journal*>>();
 	}
 
 	rollback = false;
@@ -1719,14 +1724,6 @@ context::context(bool locals_in_forked, bool transactable_facts, predicate_item*
 	this->prolog = prolog;
 }
 
-void context::REFRESH(bool sequential_mode, frame_item* f, context* CTX, interpreter* INTRP) {
-	if (sequential_mode) {
-		FRAME.load()->forced_import_transacted_globs(CTX, f);
-		f = FRAME.load();
-	}
-	FRAME.store(f->tcopy(CTX, INTRP, false));
-}
-
 context* context::add_page(bool locals_in_forked, bool transactable_facts, predicate_item* forker, tframe_item* f, predicate_item* starting, predicate_item* ending, interpreter* prolog) {
 	std::unique_lock<std::mutex> plock(pages_mutex);
 
@@ -1742,21 +1739,21 @@ context* context::add_page(bool locals_in_forked, bool transactable_facts, predi
 }
 
 void context::register_db_read(const std::string& iid) {
-	map<string, journal*>::iterator it = DBJournal->find(iid);
+	map<string, std::atomic<journal*>>::iterator it = DBJournal->find(iid);
 	if (it == DBJournal->end()) {
 		(*DBJournal)[iid] = new journal();
 		it = DBJournal->find(iid);
 	}
-	it->second->register_read();
+	it->second.load()->register_read();
 }
 
 void context::register_db_write(const std::string& iid, jTypes t, value* data, int position) {
-	map<string, journal*>::iterator it = DBJournal->find(iid);
+	map<string, std::atomic<journal*>>::iterator it = DBJournal->find(iid);
 	if (it == DBJournal->end()) {
 		(*DBJournal)[iid] = new journal();
 		it = DBJournal->find(iid);
 	}
-	it->second->register_write(t, data, position);
+	it->second.load()->register_write(t, data, position);
 }
 
 bool context::join(bool sequential_mode, int K, frame_item* f, interpreter* INTRP) {
@@ -1987,7 +1984,7 @@ bool context::join(bool sequential_mode, int K, frame_item* f, interpreter* INTR
 						std::unique_lock<std::mutex> dblock(*DBLOCK);
 						std::unique_lock<std::mutex> wdblock(*CONTEXTS[winner]->DBLOCK);
 						string fact = vname.substr(1);
-						map<string, journal*>::iterator its = CONTEXTS[winner]->DBJournal->find(fact);
+						map<string, std::atomic<journal*>>::iterator its = CONTEXTS[winner]->DBJournal->find(fact);
 						if (its != CONTEXTS[winner]->DBJournal->end()) {
 							journal* SRC = its->second;
 							map<string, std::atomic<vector<term*>*>>::iterator it = DB->find(fact);
@@ -2005,6 +2002,7 @@ bool context::join(bool sequential_mode, int K, frame_item* f, interpreter* INTR
 								else if (jlog->type == jDelete) {
 									register_db_write(fact, jDelete, jlog->data, jlog->position);
 									it->second.load()->erase(it->second.load()->begin() + jlog->position);
+									jlog->data->use(); // to prevent free in ~journal_item()
 								}
 								else {
 									cout << "Internal error : unknown DB journal record type!" << endl;
@@ -2055,7 +2053,7 @@ bool context::join(bool sequential_mode, int K, frame_item* f, interpreter* INTR
 						std::unique_lock<std::mutex> lock(*DBLOCK);
 						std::unique_lock<std::mutex> ilock(*CONTEXTS[i]->DBLOCK);
 						// Delete journal, including deleted nodes
-						map<string, journal*>::iterator itj = CONTEXTS[i]->DBJournal->begin();
+						map<string, std::atomic<journal*>>::iterator itj = CONTEXTS[i]->DBJournal->begin();
 						while (itj != CONTEXTS[i]->DBJournal->end()) {
 							delete itj->second;
 							itj++;
@@ -2084,10 +2082,6 @@ bool context::join(bool sequential_mode, int K, frame_item* f, interpreter* INTR
 							itd++;
 						}
 						for (term* v : Q) {
-							if (v->get_refs() == 1) {
-								std::cout << "DB Pump loses items!" << endl;
-								exit(1970);
-							}
 							v->free();
 						}
 						ilock.unlock();
@@ -2104,7 +2098,13 @@ bool context::join(bool sequential_mode, int K, frame_item* f, interpreter* INTR
 						joined++;
 					}
 					else {
-						CONTEXTS[i]->FRAME.store(f->tcopy(this, INTRP, false));
+						if (sequential >= 0) {
+							tframe_item* newf = CONTEXTS[i]->INIT.load()->tcopy(this, INTRP);
+							newf->forced_import_transacted_globs(this, f);
+							CONTEXTS[i]->FRAME.store(newf);
+						}
+						else
+							CONTEXTS[i]->FRAME.store(f->tcopy(this, INTRP, false));
 						CONTEXTS[i]->set_rollback(false);
 						CONTEXTS[i]->THR->set_stopped(false);
 					}
@@ -2156,7 +2156,7 @@ bool context::join(bool sequential_mode, int K, frame_item* f, interpreter* INTR
 }
 
 void context::clearDBJournals() {
-	map<string, journal*>::iterator itj = DBJournal->begin();
+	map<string, std::atomic<journal*>>::iterator itj = DBJournal->begin();
 	while (itj != DBJournal->end()) {
 		delete itj->second;
 		itj++;
@@ -2167,6 +2167,7 @@ void context::clearDBJournals() {
 context::~context() {
 	for (context* C : CONTEXTS)
 		delete C;
+	delete INIT;
 	if (transactable_facts || parent == NULL) {
 		map< string, std::atomic<vector<term*>*>>::iterator itd = DB->begin();
 		while (itd != DB->end()) {
@@ -2178,7 +2179,7 @@ context::~context() {
 		delete DBLOCK;
 		delete DB;
 
-		map<string, journal*>::iterator itj = DBJournal->begin();
+		map<string, std::atomic<journal*>>::iterator itj = DBJournal->begin();
 		while (itj != DBJournal->end()) {
 			delete itj->second;
 			itj++;
@@ -6872,6 +6873,8 @@ public:
 			it = CTX->DB->find(atid);
 		}
 		
+		CTX->register_db_read(atid);
+
 		vector<term *> * terms = it->second;
 		term* tt = (term*)t->copy(CTX, f);
 		if (z) {

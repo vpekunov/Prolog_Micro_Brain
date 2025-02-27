@@ -71,14 +71,14 @@
 
 	run17 :- g_assign('&A',0), *{g_read('&A',A), write(A), B is A+1, g_assign('&A',B), =(B,5); rollback}, {&}.
 
-	run18 :- retractall(a(_)), !{(for(M,1,1000),fail;true),asserta(a(1)),write(1)},!{asserta(a(2)),write(2),asserta(s(1))},{&},
+	run18 :- retractall(a(_)), {(for(M,1,1000),fail;true),asserta(a(1)),write(1)},{asserta(a(2)),write(2),asserta(s(1))},{&},
 		 nl,
 		 a(A),
 		 write(A),
 		 fail;
 		 true.
 
-	run19 :- retractall(a(_)), !{(for(M,1,1000),fail;true),asserta(a(1)),write(1)},!{retractall(a(3)),asserta(a(2)),write(2)},{&},
+	run19 :- retractall(a(_)), !{(for(M,1,1000),fail;true),asserta(a(1)),write(1)},!{asserta(a(2)),write(2)},{&},
 		 nl,
 		 a(A),
 		 write(A),
@@ -89,7 +89,7 @@
 
 	run21 :- *for(I,1,20){write(I),(*for(A,1,3){write(x),fail};true)}.
 
-	run22 :- *for(I,1,20){write(I)}.
+	run22 :- *for(I,1,20){write(I)},write(I).
 
 	run23a(1) :- write(a).
 	run23a(3) :- fail.
@@ -98,18 +98,24 @@
 
 	run23 :- *run23a(A){write(A)}.
 
-	run24a :- fail.
+	run24a(1) :- fail.
 
 	run24 :- *run24a(A){write(A)}.
 
 	repeat.
 	repeat:-repeat.
 
-	run25 :- *repeat{write(x)}.
+	run25 :- member(X,[1,2,3]),write(X),*repeat{write(x)},fail.
 
 	run26 :- {*member(A,[1,2,3]){{write(A)},{&}}},{&}.
 
 	run27 :- asserta(num(x)),retractall(num(_)),*member(A,[1,2,3,4,5]){asserta(num(A)),A>3},num(X),write(X),fail.
+
+	run28 :- *member(A,[1,2,3]){write(x)},write(A).
+
+	run29 :- g_assign('C', 0), member(A,[1,2,3]),*repeat{g_read('C',C),write(C),C1 is C+1,g_assign('C',C1)},write(' '),fail.
+
+	run30 :- g_assign('C', 0), *repeat{g_read('C',C),C1 is C+1,g_assign('C',C1),write(C),C>4}, write(' '), write(C).
 
 	generate_facts(This,N):-
 		>(This,N),

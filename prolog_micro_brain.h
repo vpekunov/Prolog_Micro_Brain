@@ -188,9 +188,10 @@ public:
 
 	std::mutex * DBLOCK;
 	map< string, std::atomic<vector<term*>*>> * DB;
-	map<string, journal*> * DBJournal;
+	map<string, std::atomic<journal*>> * DBJournal;
 
 	vector<context*> CONTEXTS;
+	std::atomic<tframe_item*> INIT;
 	std::atomic<tframe_item*> FRAME;
 	tthread* THR;
 
@@ -212,8 +213,6 @@ public:
 	std::mutex pages_mutex;
 
 	virtual context* add_page(bool locals_in_forked, bool transactable_facts, predicate_item * forker, tframe_item* f, predicate_item* starting, predicate_item* ending, interpreter* prolog);
-
-	virtual void REFRESH(bool sequential_mode, frame_item* f, context* CTX, interpreter* INTRP);
 
 	virtual void register_db_read(const std::string& iid);
 
@@ -471,7 +470,7 @@ public:
 	virtual void forced_import_transacted_globs(context* CTX, frame_item* inheriting) {
 		for (mapper& m : inheriting->vars) {
 			if (m._name[0] == '*')
-				set(CTX, m._name, m.ptr);
+				set(CTX, m._name, m.ptr, true);
 		}
 	}
 
@@ -590,7 +589,7 @@ public:
 		}
 	}
 
-	virtual void set(context * CTX, const char * name, value * v) {
+	virtual void set(context * CTX, const char * name, value * v, bool set_time_zero = false) {
 		bool found = false;
 		int it = find(name, found);
 		if (found) {
@@ -721,7 +720,7 @@ public:
 		creation = clock();
 	}
 
-	virtual void set(context * CTX, const char* name, value* v) {
+	virtual void set(context * CTX, const char* name, value* v, bool set_time_zero = false) {
 		bool locked = mutex.try_lock();
 		bool found = false;
 		int it = find(name, found);
@@ -747,9 +746,14 @@ public:
 				vars[it].ptr->free();
 			vars[it].ptr = v ? v->copy(CTX, this) : NULL;
 		}
-		if (first_writes[it] == 0)
-			first_writes[it] = clock();
-		last_writes[it] = clock();
+		if (set_time_zero) {
+			first_writes[it] = last_writes[it] = first_reads[it] = last_reads[it] = 0;
+		}
+		else {
+			if (first_writes[it] == 0)
+				first_writes[it] = clock();
+			last_writes[it] = clock();
+		}
 		if (locked) mutex.unlock();
 	}
 
@@ -860,7 +864,7 @@ public:
 
 	virtual void register_facts(context* CTX, std::set<string>& names) {
 		std::unique_lock<std::mutex> lock(*CTX->DBLOCK);
-		map<string, journal*>::iterator it = CTX->DBJournal->begin();
+		map<string, std::atomic<journal*>>::iterator it = CTX->DBJournal->begin();
 		while (it != CTX->DBJournal->end()) {
 			string fact = it->first;
 			register_fact_group(CTX, fact, it->second);
@@ -872,7 +876,7 @@ public:
 
 	virtual void unregister_facts(context* CTX) {
 		std::unique_lock<std::mutex> lock(*CTX->DBLOCK);
-		map<string, journal*>::iterator it = CTX->DBJournal->begin();
+		map<string, std::atomic<journal*>>::iterator it = CTX->DBJournal->begin();
 		while (it != CTX->DBJournal->end()) {
 			string fact = it->first;
 			unregister_fact_group(CTX, fact);
