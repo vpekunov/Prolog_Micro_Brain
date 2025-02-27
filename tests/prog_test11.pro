@@ -113,7 +113,7 @@
 
 	run28 :- *member(A,[1,2,3]){write(x)},write(A).
 
-	run29 :- g_assign('C', 0), member(A,[1,2,3]),*repeat{g_read('C',C),write(C),C1 is C+1,g_assign('C',C1)},write(' '),fail.
+	run29 :- g_assign('C', 0), member(A,[1,2,3]),*repeat{g_read('C',C),write(C),C1 is C+1,g_assign('C',C1)},write(' '),write(C),fail.
 
 	run30 :- g_assign('C', 0), *repeat{g_read('C',C),C1 is C+1,g_assign('C',C1),write(C),C>4}, write(' '), write(C).
 
@@ -239,6 +239,7 @@
 								J is Jp + K
 						),
 						once(mark_nprimes(J, K, End)),
+						fail
 				},
 				fail
 			);
