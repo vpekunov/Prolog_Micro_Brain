@@ -71,7 +71,7 @@
 
 	run17 :- g_assign('&A',0), *{g_read('&A',A), write(A), B is A+1, g_assign('&A',B), =(B,5); rollback}, {&}.
 
-	run18 :- retractall(a(_)), {(for(M,1,1000),fail;true),asserta(a(1)),write(1)},{asserta(a(2)),write(2),asserta(s(1))},{&},
+	run18 :- retractall(a(_)), !{(for(M,1,1000),fail;true),asserta(a(1)),write(1)},!{retractall(a(_)),asserta(a(2)),write(2),asserta(s(1))},{&},
 		 nl,
 		 a(A),
 		 write(A),

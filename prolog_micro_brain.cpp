@@ -6874,7 +6874,7 @@ public:
 			it = CTX->DB->find(atid);
 		}
 		
-		CTX->register_db_read(atid);
+		// CTX->register_db_read(atid);
 
 		vector<term *> * terms = it->second;
 		term* tt = (term*)t->copy(CTX, f);
