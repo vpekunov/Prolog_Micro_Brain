@@ -217,9 +217,11 @@ public:
 
 	virtual void register_db_read(const std::string& iid);
 
-	virtual void register_db_write(const std::string& iid, jTypes t, value* data, int position);
+	virtual void register_db_write(const std::string& iid, jTypes t, value* data, int position, journal * src = NULL);
 	
 	virtual bool join(bool sequential_mode, int K, frame_item* f, interpreter* INTRP);
+
+	virtual void apply_transactional_db_to_parent(const std::string& fact);
 };
 
 class interpreter {
@@ -659,8 +661,32 @@ public:
 			return NULL;
 	}
 
-	virtual void register_facts(context* CTX, std::set<string>& names) { }
-	virtual void unregister_facts(context* CTX) { }
+	virtual void register_facts(context* CTX, std::set<string>& names) {
+		std::unique_lock<std::mutex> lock(*CTX->DBLOCK);
+		map<string, std::atomic<journal*>>::iterator it = CTX->DBJournal->begin();
+		while (it != CTX->DBJournal->end()) {
+			string fact = it->first;
+			register_fact_group(CTX, fact, it->second);
+			names.insert(fact);
+			it++;
+		}
+		lock.unlock();
+	}
+
+	virtual void unregister_facts(context* CTX) {
+		std::unique_lock<std::mutex> lock(*CTX->DBLOCK);
+		map<string, std::atomic<journal*>>::iterator it = CTX->DBJournal->begin();
+		while (it != CTX->DBJournal->end()) {
+			string fact = it->first;
+			unregister_fact_group(CTX, fact);
+			it++;
+		}
+		lock.unlock();
+	}
+
+	virtual void register_fact_group(context* CTX, string& fact, journal* J);
+
+	virtual void unregister_fact_group(context* CTX, string& fact);
 };
 
 class tthread {
@@ -871,30 +897,7 @@ public:
 
 	virtual void register_fact_group(context* CTX, string & fact, journal* J);
 
-	virtual void unregister_fact_group(context* CTX, string & fact);
-
-	virtual void register_facts(context* CTX, std::set<string>& names) {
-		std::unique_lock<std::mutex> lock(*CTX->DBLOCK);
-		map<string, std::atomic<journal*>>::iterator it = CTX->DBJournal->begin();
-		while (it != CTX->DBJournal->end()) {
-			string fact = it->first;
-			register_fact_group(CTX, fact, it->second);
-			names.insert(fact);
-			it++;
-		}
-		lock.unlock();
-	}
-
-	virtual void unregister_facts(context* CTX) {
-		std::unique_lock<std::mutex> lock(*CTX->DBLOCK);
-		map<string, std::atomic<journal*>>::iterator it = CTX->DBJournal->begin();
-		while (it != CTX->DBJournal->end()) {
-			string fact = it->first;
-			unregister_fact_group(CTX, fact);
-			it++;
-		}
-		lock.unlock();
-	}
+	virtual void unregister_fact_group(context* CTX, string& fact);
 
 	virtual void sync(bool not_sync_globs, context* CTX, frame_item* other) {
 		bool locked = mutex.try_lock();
@@ -1244,10 +1247,23 @@ public:
 		last_read = clock();
 	}
 
-	virtual void register_write(jTypes t, value* data, int position) {
-		if (!first_write)
-			first_write = clock();
-		last_write = clock();
+	virtual void register_write(jTypes t, value* data, int position, journal * src = NULL) {
+		if (src) {
+			if (!first_write || src->first_write < first_write)
+				first_write = src->first_write;
+			if (!last_write || src->last_write > last_write)
+				last_write = src->last_write;
+			if (!first_read || src->first_read < first_read)
+				first_read = src->first_read;
+			if (!last_read || src->last_read > last_read)
+				last_read = src->last_read;
+		}
+		else {
+			if (!first_write) {
+				first_write = clock();
+			}
+			last_write = clock();
+		}
 
 		log.push_back(new journal_item(t, data, position));
 	}

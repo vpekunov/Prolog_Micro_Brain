@@ -117,6 +117,11 @@
 
 	run30 :- g_assign('C', 0), *repeat{g_read('C',C),C1 is C+1,g_assign('C',C1),write(C),C>4}, write(' '), write(C).
 
+	run31a(0) :- !.
+	run31a(X) :- !{ assertz(runer31(X)), X1 is X-1, run31a(X1) }, !{ assertz(runer31(X)), Y1 is X-1, run31a(Y1) }, {&}.
+
+	run31 :- run31a(5),!,runer31(A),write(A),write(' '),fail.
+
 	generate_facts(This,N):-
 		>(This,N),
 		!.
@@ -175,11 +180,12 @@
 		generate_facts(2,N),
 		(
 		  (
-			for(M, 2, CSqrtN),
+			*for(M, 2, CSqrtN){
 				prime(M),
 				First is M*2,
 				once(mark_nprimes(First, M, N)),
 				fail
+			}
 		  );
 		  true
 		),

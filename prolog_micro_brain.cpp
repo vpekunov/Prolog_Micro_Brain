@@ -608,6 +608,24 @@ void tthread::body() {
 	} while (!terminated.test_and_set());
 }
 
+void frame_item::register_fact_group(context* CTX, string& fact, journal* J) {
+	bool found = false;
+	fact.insert(0, 1, '!');
+	int it = find(fact.c_str(), found);
+	if (!found) {
+		set(CTX, fact.c_str(), NULL);
+		it = find(fact.c_str(), found);
+	}
+}
+
+void frame_item::unregister_fact_group(context* CTX, string& fact) {
+	bool found = false;
+	fact.insert(0, 1, '!');
+	int it = find(fact.c_str(), found);
+	if (found)
+		unset(CTX, fact.c_str());
+}
+
 void tframe_item::register_fact_group(context* CTX, string& fact, journal* J) {
 	bool locked = mutex.try_lock();
 	bool found = false;
@@ -630,12 +648,7 @@ void tframe_item::register_fact_group(context* CTX, string& fact, journal* J) {
 
 void tframe_item::unregister_fact_group(context* CTX, string& fact) {
 	bool locked = mutex.try_lock();
-	bool found = false;
-	fact.insert(0, 1, '!');
-	int it = find(fact.c_str(), found);
-	if (found)
-		unset(CTX, fact.c_str());
-
+	frame_item::unregister_fact_group(CTX, fact);
 	if (locked) mutex.unlock();
 }
 
@@ -1747,13 +1760,45 @@ void context::register_db_read(const std::string& iid) {
 	it->second.load()->register_read();
 }
 
-void context::register_db_write(const std::string& iid, jTypes t, value* data, int position) {
+void context::register_db_write(const std::string& iid, jTypes t, value* data, int position, journal * src) {
 	map<string, std::atomic<journal*>>::iterator it = DBJournal->find(iid);
 	if (it == DBJournal->end()) {
 		(*DBJournal)[iid] = new journal();
 		it = DBJournal->find(iid);
 	}
-	it->second.load()->register_write(t, data, position);
+	it->second.load()->register_write(t, data, position, src);
+}
+
+void context::apply_transactional_db_to_parent(const std::string & fact) {
+	map<string, std::atomic<journal*>>::iterator its = DBJournal->find(fact);
+	if (its != DBJournal->end()) {
+		journal* SRC = its->second;
+		map<string, std::atomic<vector<term*>*>>::iterator it = parent->DB->find(fact);
+		if (it == parent->DB->end()) {
+			(*parent->DB)[fact] = new vector<term*>();
+			it = parent->DB->find(fact);
+		}
+		// Apply journal
+		for (journal_item* jlog : SRC->log) {
+			if (jlog->type == jInsert) {
+				parent->register_db_write(fact, jInsert, jlog->data, jlog->position, SRC);
+				it->second.load()->insert(it->second.load()->begin() + jlog->position, (term*)jlog->data);
+				jlog->data->use(); // to prevent free in ~journal_item()
+			}
+			else if (jlog->type == jDelete) {
+				parent->register_db_write(fact, jDelete, jlog->data, jlog->position, SRC);
+				it->second.load()->erase(it->second.load()->begin() + jlog->position);
+				jlog->data->use(); // to prevent free in ~journal_item()
+			}
+			else {
+				cout << "Internal error : unknown DB journal record type!" << endl;
+				exit(1700);
+			}
+		}
+		// Clear journal
+		delete SRC;
+		DBJournal->erase(fact);
+	}
 }
 
 bool context::join(bool sequential_mode, int K, frame_item* f, interpreter* INTRP) {
@@ -1981,40 +2026,14 @@ bool context::join(bool sequential_mode, int K, frame_item* f, interpreter* INTR
 				if (lnames[winner].find(vname) != lnames[winner].end() && CONTEXTS[winner]->FRAME.load()->first_write(vname))
 				{
 					if (vname[0] == '!') {
-						std::unique_lock<std::mutex> dblock(*DBLOCK);
-						std::unique_lock<std::mutex> wdblock(*CONTEXTS[winner]->DBLOCK);
-						string fact = vname.substr(1);
-						map<string, std::atomic<journal*>>::iterator its = CONTEXTS[winner]->DBJournal->find(fact);
-						if (its != CONTEXTS[winner]->DBJournal->end()) {
-							journal* SRC = its->second;
-							map<string, std::atomic<vector<term*>*>>::iterator it = DB->find(fact);
-							if (it == DB->end()) {
-								(*DB)[fact] = new vector<term*>();
-								it = DB->find(fact);
-							}
-							// Apply journal
-							for (journal_item* jlog : SRC->log) {
-								if (jlog->type == jInsert) {
-									register_db_write(fact, jInsert, jlog->data, jlog->position);
-									it->second.load()->insert(it->second.load()->begin() + jlog->position, (term*)jlog->data);
-									jlog->data->use(); // to prevent free in ~journal_item()
-								}
-								else if (jlog->type == jDelete) {
-									register_db_write(fact, jDelete, jlog->data, jlog->position);
-									it->second.load()->erase(it->second.load()->begin() + jlog->position);
-									jlog->data->use(); // to prevent free in ~journal_item()
-								}
-								else {
-									cout << "Internal error : unknown DB journal record type!" << endl;
-									exit(1700);
-								}
-							}
-							// Clear journal
-							delete SRC;
-							CONTEXTS[winner]->DBJournal->erase(fact);
+						if (DB != CONTEXTS[winner]->DB) {
+							string fact = vname.substr(1);
+							std::unique_lock<std::mutex> dblock(*DBLOCK);
+							std::unique_lock<std::mutex> wdblock(*CONTEXTS[winner]->DBLOCK);
+							CONTEXTS[winner]->apply_transactional_db_to_parent(fact);
+							wdblock.unlock();
+							dblock.unlock();
 						}
-						wdblock.unlock();
-						dblock.unlock();
 					}
 					else if (vname[0] == '*' || CONTEXTS[winner]->THR->get_result())
 					{
@@ -7678,9 +7697,8 @@ bool interpreter::process(context * CONTEXT, bool neg, clause * this_clause, pre
 	predicate* user_p = user ? user->get_user_predicate() : NULL;
 
 	bool context_locals = CONTEXT && CONTEXT->locals_in_forked;
-	bool trans_facts = CONTEXT && CONTEXT->transactable_facts;
 
-	context* CNT = user_p && user_p->is_forking() ? new context(context_locals, trans_facts, NULL, 100, CONTEXT, NULL, NULL, NULL, this) : CONTEXT;
+	context* CNT = user_p && user_p->is_forking() ? new context(context_locals, false, NULL, 100, CONTEXT, NULL, NULL, NULL, this) : CONTEXT;
 
 	generated_vars * variants = p ? p->generate_variants(CNT, f, *positional_vals) : new generated_vars(1, f->copy(CNT));
 
