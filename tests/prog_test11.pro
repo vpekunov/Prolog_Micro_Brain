@@ -102,9 +102,6 @@
 
 	run24 :- *run24a(A){write(A)}.
 
-	repeat.
-	repeat:-repeat.
-
 	run25 :- member(X,[1,2,3]),write(X),*repeat{write(x)},fail.
 
 	run26 :- {*member(A,[1,2,3]){{write(A)},{&}}},{&}.
@@ -121,6 +118,8 @@
 	run31a(X) :- !{ assertz(runer31(X)), X1 is X-1, run31a(X1) }, !{ assertz(runer31(X)), Y1 is X-1, run31a(Y1) }, {&}.
 
 	run31 :- run31a(5),!,runer31(A),write(A),write(' '),fail.
+
+	run32 :- simples_new(1000, 0.85), primes(P), write(P).
 
 	generate_facts(This,N):-
 		>(This,N),
@@ -180,6 +179,7 @@
 		generate_facts(2,N),
 		(
 		  (
+			set_iteration_star_packet(2),
 			*for(M, 2, CSqrtN){
 				prime(M),
 				First is M*2,
@@ -253,3 +253,57 @@
 		),
 		{&},
 		!.
+
+% Non-effective, but *predicate{} demonstration with some really parallel iterations!
+
+	simples_new(N,NonParallelism):-
+		End is floor(N*NonParallelism),
+		Start is End+1,
+		retractall(primes(_)),
+		asserta(primes([])),
+		once(
+			for (I, 2, End),
+				primes(L),
+				once(
+					member(Prime, L),
+						(R is I - floor(I/Prime)*Prime,
+							(
+								==(R, 0)->
+									(!,fail);
+									fail
+							)
+						);
+						(
+							append(L, [I], L1),
+							retract(primes(_)),
+							asserta(primes(L1))
+						)
+				),
+				fail
+			;
+			true
+		),
+		once(
+			set_iteration_star_packet(2),
+			*for (I, Start, N){
+				primes(L),
+				once(
+					member(Prime, L),
+						(R is I - floor(I/Prime)*Prime,
+							(
+								==(R, 0)->
+									(!,fail);
+									fail
+							)
+						);
+						(
+							append(L, [I], L1),
+							retract(primes(_)),
+							asserta(primes(L1))
+						)
+				),
+				fail
+			};
+			true
+		).
+

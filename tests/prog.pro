@@ -10,9 +10,6 @@
 	loop(N,N).
 	loop(X,N):-write(X),X1 is X+1,loop(X1,N).
 
-	repeat.
-	repeat:-repeat.
-
 	once1:-once(repeat), write('!'), fail.
 	once1.
 

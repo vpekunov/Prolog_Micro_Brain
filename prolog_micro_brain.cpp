@@ -29,6 +29,10 @@
 #include "elements.h"
 #include "prolog_micro_brain.h"
 
+#ifdef _POSIX_PRIORITY_SCHEDULING
+#include <sched.h>
+#endif
+
 const unsigned int eli = 0x8f;
 
 void reverse(char s[])
@@ -583,29 +587,101 @@ tframe_item* frame_item::tcopy(context* CTX, interpreter* INTRP, bool import_glo
 	return result;
 }
 
+tthread* thread_pool::get_thread(int _id, context* CTX) {
+	guard.lock();
+	if (available.size() == 0) {
+		available.insert(new tthread(_id, CTX));
+	}
+	else
+		(*available.begin())->reinit(_id, CTX);
+	tthread* result = *available.begin();
+	available.erase(result);
+	used.insert(result);
+	guard.unlock();
+	return result;
+}
+
+void thread_pool::free_thread(tthread* t) {
+	guard.lock();
+	used.erase(t);
+	available.insert(t);
+	guard.unlock();
+}
+
+thread_pool::~thread_pool() {
+	for (tthread* t : available)
+		delete t;
+}
+
+void tthread::reinit(int _id, context* CTX) {
+	this->_id = _id;
+	result = false;
+	stopped.store(false);
+
+	if (CTX) {
+		std::lock_guard<std::mutex> lk(cv_m);
+		CONTEXT.store(CTX);
+		cv.notify_one();
+	}
+	else
+		CONTEXT.store(NULL);
+
+	set_terminated(false);
+}
+
+tthread::~tthread() {
+	allow_stop.store(true);
+	{
+		std::lock_guard<std::mutex> lk(cv_m);
+		CONTEXT.store((context*)1);
+		cv.notify_one();
+	}
+	runner->join();
+	delete runner;
+}
+
 void tthread::body() {
-	tframe_item* OLD_FRAME = NULL;
-	set_stopped(false);
 	do {
-		terminated.clear();
-		delete OLD_FRAME;
-		while (OLD_FRAME == CONTEXT->FRAME.load())
-			std::this_thread::yield();
-		OLD_FRAME = CONTEXT->FRAME.load();
-		// Process
-		predicate_item* first = CONTEXT->starting;
-		vector<value*>* first_args = CONTEXT->prolog->accept(CONTEXT, OLD_FRAME, first);
-		set_result(CONTEXT->prolog->process(CONTEXT, false, first->get_parent(), first, OLD_FRAME, &first_args));
-		if (first_args) {
-			for (int j = 0; j < first_args->size(); j++)
-				first_args->at(j)->free();
-			delete first_args;
+		tframe_item* OLD_FRAME = NULL;
+		set_stopped(false);
+		do {
+			set_terminated(false);
+			while (OLD_FRAME == CONTEXT.load()->FRAME.load())
+				std::this_thread::sleep_for(std::chrono::nanoseconds(1));
+			// delete OLD_FRAME;
+			OLD_FRAME = CONTEXT.load()->FRAME.load();
+			// Process
+			predicate_item* first = CONTEXT.load()->starting;
+			vector<value*>* first_args = CONTEXT.load()->prolog->accept(CONTEXT.load(), OLD_FRAME, first);
+			set_result(CONTEXT.load()->prolog->process(CONTEXT.load(), false, first->get_parent(), first, OLD_FRAME, &first_args));
+			if (first_args) {
+				for (int j = 0; j < first_args->size(); j++)
+					first_args->at(j)->free();
+				delete first_args;
+			}
+
+			{
+				std::lock_guard<std::mutex> lk(cvf_m);
+				set_stopped(true);
+				cvf.notify_one();
+			}
+
+			std::unique_lock<std::mutex> lk(cvs_m);
+			while (is_stopped())
+				cvs.wait(lk);
+		} while (!is_terminated());
+
+		{
+			std::lock_guard<std::mutex> lk(cvt_m);
+			set_terminated(false);
+			cvt.notify_one();
 		}
 
-		set_stopped(true);
-		while (is_stopped())
-			std::this_thread::yield();
-	} while (!terminated.test_and_set());
+		std::unique_lock<std::mutex> lk(cv_m);
+		while (NULL == CONTEXT.load()) {
+			cv.wait(lk);
+		}
+	} while (!allow_stop);
 }
 
 void frame_item::register_fact_group(context* CTX, string& fact, journal* J) {
@@ -635,14 +711,26 @@ void tframe_item::register_fact_group(context* CTX, string& fact, journal* J) {
 		set(CTX, fact.c_str(), NULL);
 		it = find(fact.c_str(), found);
 	}
-	if (!first_writes[it] || first_writes[it] > J->first_write)
+	if (!first_writes[it] || first_writes[it] > J->first_write) {
 		first_writes[it] = J->first_write;
-	if (!last_writes[it] || last_writes[it] < J->last_write)
+		if (!last_writes[it])
+			last_writes[it] = first_writes[it];
+	}
+	if (!last_writes[it] || last_writes[it] < J->last_write) {
 		last_writes[it] = J->last_write;
-	if (!first_reads[it] || first_reads[it] > J->first_read)
+		if (!first_writes[it])
+			first_writes[it] = last_writes[it];
+	}
+	if (!first_reads[it] || first_reads[it] > J->first_read) {
 		first_reads[it] = J->first_read;
-	if (!last_reads[it] || last_reads[it] < J->last_read)
+		if (!last_reads[it])
+			last_reads[it] = first_reads[it];
+	}
+	if (!last_reads[it] || last_reads[it] < J->last_read) {
 		last_reads[it] = J->last_read;
+		if (!first_reads[it])
+			first_reads[it] = last_reads[it];
+	}
 	if (locked) mutex.unlock();
 }
 
@@ -1744,7 +1832,7 @@ context* context::add_page(bool locals_in_forked, bool transactable_facts, predi
 
 	CONTEXTS.push_back(result);
 
-	result->THR = new tthread(CONTEXTS.size() - 1, result);
+	result->THR = prolog->THREAD_POOL->get_thread(CONTEXTS.size() - 1, result);
 
 	plock.unlock();
 
@@ -1840,7 +1928,12 @@ bool context::join(bool sequential_mode, int K, frame_item* f, interpreter* INTR
 		names.insert(lnames[CONTEXTS.size() - 1].begin(), lnames[CONTEXTS.size() - 1].end());
 		while (stopped < CONTEXTS.size()) {
 			for (int i = 0; i < CONTEXTS.size(); i++)
-				if (!joineds[i] && !stoppeds[i] && !rollback[i] && CONTEXTS[i]->THR->is_stopped()) {
+				if (!joineds[i] && !stoppeds[i] && !rollback[i]) {
+					{
+						std::unique_lock<std::mutex> lk(CONTEXTS[i]->THR->get_finished_mutex());
+						while (!CONTEXTS[i]->THR->is_stopped())
+							CONTEXTS[i]->THR->get_finished_var().wait(lk);
+					}
 					rollback[i] = CONTEXTS[i]->rollback;
 					stoppeds[i] = !rollback[i];
 					if (stoppeds[i]) {
@@ -1851,7 +1944,6 @@ bool context::join(bool sequential_mode, int K, frame_item* f, interpreter* INTR
 					}
 					stopped++;
 				}
-			std::this_thread::yield();
 		}
 		stopped -= std::count(rollback.begin(), rollback.end(), true);
 		// In not joineds search for winners
@@ -2108,31 +2200,53 @@ bool context::join(bool sequential_mode, int K, frame_item* f, interpreter* INTR
 					}
 					// CONTEXTS[i]->REFRESH(sequential_mode, f, this, INTRP);
 					if (stopped_by_true) {
+						CONTEXTS[i]->THR->set_context(NULL);
 						CONTEXTS[i]->THR->set_terminated(true);
-						CONTEXTS[i]->THR->set_stopped(false);
-						CONTEXTS[i]->THR->join();
+						{
+							std::lock_guard<std::mutex> lk(CONTEXTS[i]->THR->get_stopped_mutex());
+							CONTEXTS[i]->THR->set_stopped(false);
+							CONTEXTS[i]->THR->get_stopped_var().notify_one();
+						}
+						{
+							std::unique_lock<std::mutex> lk(CONTEXTS[i]->THR->get_terminated_mutex());
+							while (CONTEXTS[i]->THR->is_terminated())
+								CONTEXTS[i]->THR->get_terminated_var().wait(lk);
+						}
 						joineds[i] = true;
 						if (CONTEXTS[i]->THR->get_result())
 							success++;
 						joined++;
 					}
 					else {
+						FRAMES_TO_DELETE.push(CONTEXTS[i]->FRAME.load());
 						if (sequential >= 0) {
 							tframe_item* newf = CONTEXTS[i]->INIT.load()->tcopy(this, INTRP);
-							if (sequential == i)
-								newf->forced_import_transacted_globs(this, f);
+							newf->forced_import_transacted_globs(this, f);
 							CONTEXTS[i]->FRAME.store(newf);
 						}
 						else
 							CONTEXTS[i]->FRAME.store(f->tcopy(this, INTRP, false));
 						CONTEXTS[i]->set_rollback(false);
-						CONTEXTS[i]->THR->set_stopped(false);
+						{
+							std::lock_guard<std::mutex> lk(CONTEXTS[i]->THR->get_stopped_mutex());
+							CONTEXTS[i]->THR->set_stopped(false);
+							CONTEXTS[i]->THR->get_stopped_var().notify_one();
+						}
 					}
 				}
 				else {
+					CONTEXTS[i]->THR->set_context(NULL);
 					CONTEXTS[i]->THR->set_terminated(true);
-					CONTEXTS[i]->THR->set_stopped(false);
-					CONTEXTS[i]->THR->join();
+					{
+						std::lock_guard<std::mutex> lk(CONTEXTS[i]->THR->get_stopped_mutex());
+						CONTEXTS[i]->THR->set_stopped(false);
+						CONTEXTS[i]->THR->get_stopped_var().notify_one();
+					}
+					{
+						std::unique_lock<std::mutex> lk(CONTEXTS[i]->THR->get_terminated_mutex());
+						while (CONTEXTS[i]->THR->is_terminated())
+							CONTEXTS[i]->THR->get_terminated_var().wait(lk);
+					}
 					joineds[i] = true;
 					if (CONTEXTS[i]->THR->get_result())
 						success++;
@@ -2167,8 +2281,11 @@ bool context::join(bool sequential_mode, int K, frame_item* f, interpreter* INTR
 		}
 	prolog->GLOCK.unlock();
 
-	for (context* C : CONTEXTS)
+	for (context* C : CONTEXTS) {
+		tthread* t = C->THR;
 		delete C;
+		prolog->THREAD_POOL->free_thread(t);
+	}
 	CONTEXTS.clear();
 
 	lock.unlock();
@@ -2206,8 +2323,11 @@ context::~context() {
 		}
 		delete DBJournal;
 	}
-	delete THR;
-	if (FRAME)
+	// delete THR;
+	for (tframe_item * f : FRAMES_TO_DELETE)
+		if (f != FRAME.load())
+			delete f;
+	if (FRAME.load())
 		delete FRAME.load();
 }
 
@@ -2539,6 +2659,10 @@ public:
 	}
 
 	virtual bool has_variant(int i) { return i < this->size(); }
+
+	virtual unsigned int get_max() {
+		return max_num_variants;
+	}
 
 	virtual void trunc_from(int k) {
 		if (k < max_num_variants) max_num_variants = k;
@@ -3819,16 +3943,50 @@ public:
 	}
 };
 
+class predicate_item_repeat : public predicate_item {
+	map<context*, lazy_generated_vars*> d;
+public:
+	predicate_item_repeat(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) { }
+
+	virtual const string get_id() { return "repeat"; }
+
+	virtual frame_item * get_next_variant(context * CTX, frame_item * f, int & internal_variant, vector<value *> * positional_vals) {
+		if (d[CTX]->get_max() >= internal_variant) {
+			if (internal_variant == 0x7FFFFFFF)
+				internal_variant = 0;
+			internal_variant++;
+			return f->copy(CTX);
+		}
+		else
+			return NULL;
+	}
+
+	virtual generated_vars * generate_variants(context * CTX, frame_item * f, vector<value *> * & positional_vals) {
+		if (positional_vals->size() != 0) {
+			std::cout << "repeat incorrect call!" << endl;
+			exit(-3);
+		}
+		int internal_ptr = 1;
+		frame_item * first = f->copy(CTX);
+		
+		lazy_generated_vars* v = new lazy_generated_vars(f, this, positional_vals, first, internal_ptr, once ? 1 : 0x7FFFFFFF);
+
+		d[CTX] = v;
+
+		return v;
+	}
+};
+
 class predicate_item_append : public predicate_item {
 	typedef struct { bool d1, d2, d3; } params;
 	std::map<context*, params> d;
 public:
-	predicate_item_append(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) { }
+	predicate_item_append(bool _neg, bool _once, bool _call, int num, clause* c, interpreter* _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) { }
 
 	virtual const string get_id() { return "append"; }
 
-	virtual frame_item * get_next_variant(context * CTX, frame_item * f, int & internal_variant, vector<value *> * positional_vals) {
-		frame_item * result = NULL;
+	virtual frame_item* get_next_variant(context* CTX, frame_item* f, int& internal_variant, vector<value*>* positional_vals) {
+		frame_item* result = NULL;
 
 		lock();
 		params p = d[CTX];
@@ -3838,13 +3996,13 @@ public:
 		bool d3 = p.d3;
 
 		if (d1 && d2 && d3 && internal_variant == 0) {
-			::list * L1 = dynamic_cast<::list *>(positional_vals->at(0));
-			::list * L2 = dynamic_cast<::list *>(positional_vals->at(1));
-			::list * L3 = dynamic_cast<::list *>(positional_vals->at(2));
+			::list* L1 = dynamic_cast<::list*>(positional_vals->at(0));
+			::list* L2 = dynamic_cast<::list*>(positional_vals->at(1));
+			::list* L3 = dynamic_cast<::list*>(positional_vals->at(2));
 
 			if (L1 && L2 && L3) {
-				::list * conc = L1->append(CTX, f, L2);
-				frame_item * r = f->copy(CTX);
+				::list* conc = L1->append(CTX, f, L2);
+				frame_item* r = f->copy(CTX);
 				if (conc->unify(CTX, r, L3))
 					result = r;
 				else {
@@ -3855,13 +4013,13 @@ public:
 			internal_variant++;
 		}
 		if (d1 && d2 && !d3 && internal_variant == 0) {
-			::list * L1 = dynamic_cast<::list *>(positional_vals->at(0));
-			::list * L2 = dynamic_cast<::list *>(positional_vals->at(1));
-			value * L3 = dynamic_cast<::value *>(positional_vals->at(2));
+			::list* L1 = dynamic_cast<::list*>(positional_vals->at(0));
+			::list* L2 = dynamic_cast<::list*>(positional_vals->at(1));
+			value* L3 = dynamic_cast<::value*>(positional_vals->at(2));
 
 			if (L1 && L2 && L3) {
-				::list * conc = L1->append(CTX, f, L2);
-				frame_item * r = f->copy(CTX);
+				::list* conc = L1->append(CTX, f, L2);
+				frame_item* r = f->copy(CTX);
 				if (L3->unify(CTX, r, conc))
 					result = r;
 				else {
@@ -3872,17 +4030,17 @@ public:
 			internal_variant++;
 		}
 		if (d1 && !d2 && d3) {
-			::list * L1 = dynamic_cast<::list *>(positional_vals->at(0));
-			value * L2 = dynamic_cast<::value *>(positional_vals->at(1));
-			::list * L3 = dynamic_cast<::list *>(positional_vals->at(2));
+			::list* L1 = dynamic_cast<::list*>(positional_vals->at(0));
+			value* L2 = dynamic_cast<::value*>(positional_vals->at(1));
+			::list* L3 = dynamic_cast<::list*>(positional_vals->at(2));
 
 			if (L1 && L2 && L3 && !result && L1->size() <= L3->size() && internal_variant <= L1->size()) {
 				internal_variant = L1->size();
-				value * K1 = NULL;
-				value * K2 = NULL;
+				value* K1 = NULL;
+				value* K2 = NULL;
 				L3->const_split(CTX, f, internal_variant, K1, K2);
 
-				frame_item * r = f->copy(CTX);
+				frame_item* r = f->copy(CTX);
 
 				if (L1->unify(CTX, r, K1) && L2->unify(CTX, r, K2))
 					result = r;
@@ -3892,22 +4050,23 @@ public:
 				}
 				K1->free();
 				K2->free();
-			} else
+			}
+			else
 				internal_variant = L3->size();
 			internal_variant++;
 		}
 		if (!d1 && d2 && d3) {
-			value * L1 = dynamic_cast<::value *>(positional_vals->at(0));
-			::list * L2 = dynamic_cast<::list *>(positional_vals->at(1));
-			::list * L3 = dynamic_cast<::list *>(positional_vals->at(2));
+			value* L1 = dynamic_cast<::value*>(positional_vals->at(0));
+			::list* L2 = dynamic_cast<::list*>(positional_vals->at(1));
+			::list* L3 = dynamic_cast<::list*>(positional_vals->at(2));
 
-			if (L1 && L2 && L3 && !result && L2->size() <= L3->size() && internal_variant <= L3->size()-L2->size()) {
+			if (L1 && L2 && L3 && !result && L2->size() <= L3->size() && internal_variant <= L3->size() - L2->size()) {
 				internal_variant = L3->size() - L2->size();
-				value * K1;
-				value * K2;
+				value* K1;
+				value* K2;
 				L3->const_split(CTX, f, internal_variant, K1, K2);
 
-				frame_item * r = f->copy(CTX);
+				frame_item* r = f->copy(CTX);
 
 				if (L1->unify(CTX, r, K1) && L2->unify(CTX, r, K2))
 					result = r;
@@ -3917,22 +4076,23 @@ public:
 				}
 				K1->free();
 				K2->free();
-			} else
+			}
+			else
 				internal_variant = L3->size();
 			internal_variant++;
 		}
 		if (!d1 && !d2 && d3 || !d1 && !d2 && !d3) {
-			value * L1 = dynamic_cast<::value *>(positional_vals->at(0));
-			value * L2 = dynamic_cast<::value *>(positional_vals->at(1));
-			::list * L3 = dynamic_cast<::list *>(positional_vals->at(2));
+			value* L1 = dynamic_cast<::value*>(positional_vals->at(0));
+			value* L2 = dynamic_cast<::value*>(positional_vals->at(1));
+			::list* L3 = dynamic_cast<::list*>(positional_vals->at(2));
 
 			if (L1 && L2 && L3)
 				for (; !result && internal_variant <= L3->size(); internal_variant++) {
-					value * K1 = new ::list(stack_container<value*>(), NULL);
-					value * K2 = new ::list(stack_container<value*>(), NULL);
+					value* K1 = new ::list(stack_container<value*>(), NULL);
+					value* K2 = new ::list(stack_container<value*>(), NULL);
 					L3->const_split(CTX, f, internal_variant, K1, K2);
 
-					frame_item * r = f->copy(CTX);
+					frame_item* r = f->copy(CTX);
 
 					if (L1->unify(CTX, r, K1) && L2->unify(CTX, r, K2))
 						result = r;
@@ -3947,7 +4107,7 @@ public:
 		return result;
 	}
 
-	virtual generated_vars * generate_variants(context * CTX, frame_item * f, vector<value *> * & positional_vals) {
+	virtual generated_vars* generate_variants(context* CTX, frame_item* f, vector<value*>*& positional_vals) {
 		if (positional_vals->size() != 3 && positional_vals->size() != 1) {
 			std::cout << "append(A,B,C)/append(F) incorrect call!" << endl;
 			exit(-3);
@@ -3963,13 +4123,14 @@ public:
 			unlock();
 
 			int internal_ptr = 0;
-			frame_item * first = get_next_variant(CTX, f, internal_ptr, positional_vals);
-		
+			frame_item* first = get_next_variant(CTX, f, internal_ptr, positional_vals);
+
 			if (first)
-				return new lazy_generated_vars(f, this, positional_vals, first, internal_ptr, once ? 1 : 0xFFFFFFFF);
+				return new lazy_generated_vars(f, this, positional_vals, first, internal_ptr, once ? 1 : 0x7FFFFFFF);
 			else
 				return NULL;
-		} else {
+		}
+		else {
 			if (!positional_vals->at(0)->defined()) {
 				std::cout << "append(F) indeterminated!" << endl;
 				exit(-3);
@@ -3978,7 +4139,7 @@ public:
 			prolog->current_output = positional_vals->at(0)->make_str();
 			prolog->outs = new std::ofstream(prolog->current_output, ios::out | ios::app);
 
-			generated_vars * result = new generated_vars();
+			generated_vars* result = new generated_vars();
 
 			result->push_back(f->copy(CTX));
 
@@ -4079,7 +4240,7 @@ public:
 		frame_item * first = get_next_variant(CTX, f, internal_ptr, positional_vals);
 
 		if (first)
-			return new lazy_generated_vars(f, this, positional_vals, first, internal_ptr, once ? 1 : 0xFFFFFFFF);
+			return new lazy_generated_vars(f, this, positional_vals, first, internal_ptr, once ? 1 : 0x7FFFFFFF);
 		else
 			return NULL;
 	}
@@ -4238,7 +4399,7 @@ public:
 		frame_item * first = get_next_variant(CTX, f, internal_ptr, positional_vals);
 
 		if (first)
-			return new lazy_generated_vars(f, this, positional_vals, first, internal_ptr, once ? 1 : 0xFFFFFFFF);
+			return new lazy_generated_vars(f, this, positional_vals, first, internal_ptr, once ? 1 : 0x7FFFFFFF);
 		else
 			return NULL;
 	}
@@ -5042,7 +5203,7 @@ public:
 		frame_item * first = get_next_variant(CTX, f, internal_ptr, positional_vals);
 
 		if (first)
-			return new lazy_generated_vars(f, this, positional_vals, first, internal_ptr, once ? 1 : 0xFFFFFFFF);
+			return new lazy_generated_vars(f, this, positional_vals, first, internal_ptr, once ? 1 : 0x7FFFFFFF);
 		else
 			return NULL;
 	}
@@ -5120,7 +5281,7 @@ public:
 		frame_item * _first = get_next_variant(CTX, f, internal_ptr, positional_vals);
 
 		if (_first)
-			return new lazy_generated_vars(f, this, positional_vals, _first, internal_ptr, once ? 1 : 0xFFFFFFFF);
+			return new lazy_generated_vars(f, this, positional_vals, _first, internal_ptr, once ? 1 : 0x7FFFFFFFF);
 		else
 			return NULL;
 	}
@@ -6637,6 +6798,35 @@ public:
 	}
 };
 
+class predicate_item_set_iteration_star_packet : public predicate_item {
+public:
+	predicate_item_set_iteration_star_packet(bool _neg, bool _once, bool _call, int num, clause* c, interpreter* _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) { }
+
+	virtual const string get_id() { return "set_iteration_star_packet"; }
+
+	virtual generated_vars* generate_variants(context* CTX, frame_item* f, vector<value*>*& positional_vals) {
+		if (positional_vals->size() != 1) {
+			std::cout << "set_iteration_star_packet(R) incorrect call!" << endl;
+			exit(-3);
+		}
+		generated_vars* result = NULL;
+		int_number * a = dynamic_cast<int_number*>(positional_vals->at(0));
+		if (!a || (int)(a->get_value()) < 1) {
+			std::cout << "set_iteration_star_packet(R): R mus be greater or equal to 1!" << endl;
+			exit(-3);
+		}
+		frame_item* ff = f->copy(CTX);
+		result = new generated_vars();
+		result->push_back(ff);
+
+		prolog->VARLOCK.lock();
+		prolog->ITERATION_STAR_PACKET = (int) a->get_value();
+		prolog->VARLOCK.unlock();
+
+		return result;
+	}
+};
+
 class predicate_item_random : public predicate_item {
 public:
 	predicate_item_random(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) { }
@@ -7242,14 +7432,18 @@ public:
 			new_f->set_written_new(CTX->SEQ_RESULT.top());
 			CTX->add_page(false, true, this, new_f, starting, ending, prolog);
 
-			if (CTX->CONTEXTS.size() == prolog->NUM_PROCS) {
+			prolog->VARLOCK.lock();
+			unsigned short warp_size = (unsigned short)prolog->ITERATION_STAR_PACKET;
+			prolog->VARLOCK.unlock();
+
+			if (CTX->CONTEXTS.size() == max(warp_size, (unsigned short)2)) {
 				if (CTX->join(true, -1, CTX->SEQ_RESULT.top(), prolog)) {
 					CTX->SEQ_MODE.at(CTX->SEQ_MODE.size() - 1) = seqTrue;
 
 					stack_container<predicate_item*>::reverse_iterator it = find(CTX->TRACERS.rbegin(), CTX->TRACERS.rend(), CTX->GENERATORS.top());
-					CTX->PARENT_CALLS.push(NULL);
-					prolog->block_process(CTX, false, true, *(--it), true); // cut!
-					CTX->PARENT_CALLS.pop();
+					// CTX->PARENT_CALLS.push(NULL);
+					prolog->block_process(CTX, false, true, *it, true); // cut!
+					// CTX->PARENT_CALLS.pop();
 				}
 			}
 
@@ -8860,6 +9054,12 @@ void interpreter::parse_clause(context * CTX, vector<string> & renew, frame_item
 							else if (_iid == id_tell) {
 								pi = new predicate_item_tell(neg, once, call, num, cl, this);
 							}
+							else if (_iid == id_set_iteration_star_packet) {
+								pi = new predicate_item_set_iteration_star_packet(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_repeat) {
+								pi = new predicate_item_repeat(neg, once, call, num, cl, this);
+							}
 							else if (_iid == id_random) {
 								pi = new predicate_item_random(neg, once, call, num, cl, this);
 							}
@@ -9187,7 +9387,9 @@ void interpreter::run() {
 }
 
 interpreter::interpreter(const string & fname, const string & starter_name) {
-	NUM_PROCS = getTotalProcs();
+	THREAD_POOL = new thread_pool();
+
+	ITERATION_STAR_PACKET = max((unsigned short)(getTotalProcs() / 3), (unsigned short)2);
 
 	file_num = 0;
 	current_input = STD_INPUT;
@@ -9268,6 +9470,8 @@ interpreter::interpreter(const string & fname, const string & starter_name) {
 	MAP["told"] = id_told;
 	MAP["see"] = id_see;
 	MAP["tell"] = id_tell;
+	MAP["set_iteration_star_packet"] = id_set_iteration_star_packet;
+	MAP["repeat"] = id_repeat;
 	MAP["random"] = id_random;
 	MAP["randomize"] = id_randomize;
 	MAP["char_code"] = id_char_code;
@@ -9334,6 +9538,7 @@ interpreter::~interpreter() {
 		delete iti->second;
 		iti++;
 	}
+	delete THREAD_POOL;
 }
 
 string interpreter::open_file(const string & fname, const string & mode) {
@@ -9498,7 +9703,7 @@ int main(int argc, char ** argv) {
 			getline(cin, line);
 
 			if (line == "end_of_file" || line == "end_of_file.")
-				exit(0);
+				break;
 
 			vector<string> renew;
 			frame_item * f = new frame_item();
