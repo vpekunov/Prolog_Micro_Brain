@@ -284,7 +284,7 @@
 			true
 		),
 		once(
-			set_iteration_star_packet(2),
+			set_iteration_star_packet(3),
 			*for (I, Start, N){
 				primes(L),
 				once(
