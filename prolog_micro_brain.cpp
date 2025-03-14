@@ -2731,6 +2731,31 @@ double interpreter::evaluate(context * CTX, frame_item * ff, const string & expr
 							pp.v = sign*fabs(a);
 							postfix.push(pp);
 						}
+						else if (id == "sin") {
+							double a = get_arg(p, ')');
+							pp.v = sign * sin(a);
+							postfix.push(pp);
+						}
+						else if (id == "cos") {
+							double a = get_arg(p, ')');
+							pp.v = sign * cos(a);
+							postfix.push(pp);
+						}
+						else if (id == "tan") {
+							double a = get_arg(p, ')');
+							pp.v = sign * tan(a);
+							postfix.push(pp);
+						}
+						else if (id == "sqrt") {
+							double a = get_arg(p, ')');
+							pp.v = sign * sqrt(a);
+							postfix.push(pp);
+						}
+						else if (id == "log") {
+							double a = get_arg(p, ')');
+							pp.v = sign * log(a);
+							postfix.push(pp);
+						}
 						else if (id == "floor") {
 							double a = get_arg(p, ')');
 							pp.v = floor(a);

@@ -121,6 +121,10 @@
 
 	run32 :- simples_new(1000, 0.85), primes(P), write(P).
 
+	run33 :- simples_miller(400, 1), primes(P), write(P).
+
+	run34 :- simples_miller(400, 0), primes(P), write(P).
+
 	generate_facts(This,N):-
 		>(This,N),
 		!.
@@ -307,3 +311,105 @@
 			true
 		).
 
+	mod_pow(_, 0, 1, 0).
+	mod_pow(_, 0, _, 1).
+	mod_pow(A, P, N, Result) :-
+		P1 is P-1,
+		once(mod_pow(A, P1, N, R1)),
+		D is floor(A*R1/N),
+		R is round(A*R1 - D*N),
+		=(Result, R).
+
+	is_strong_pp_loop(Exp, Ost_1, I, L) :-
+		Exp1 is floor(Exp / 2),
+		(
+			once(mod_pow(L, Exp1, I, Ost_1))->
+				true;
+				(
+					R is round(Exp1 - 2*floor(Exp1/2)),
+					(
+						==(R, 0)->
+							once(is_strong_pp_loop(Exp1, Ost_1, I, L));
+							(
+								!, once(mod_pow(L, Exp1, I, 1))
+							)
+					)
+				)
+		).
+
+	is_strong_pseudo_prime(I, L) :-
+		Exp is I-1,
+		Ost_1 is Exp,
+		once(mod_pow(L, Exp, I, 1)),
+		once(is_strong_pp_loop(Exp, Ost_1, I, L)).
+
+	simples_miller(N,NonParallelism):-
+		retractall(primes(_)),
+		LogN0 is log(N),
+		LogLogN0 is log(LogN0),
+		Max0 is floor(LogN0 * LogLogN0 / log(2.0)),
+		simples_new(Max0, 1),
+		primes(L),
+		append(_, [LAST], L),
+		append(L, [N], LX),
+		Start0 is LAST + 1,
+		End is Start0 + floor((N-Start0)*NonParallelism),
+		Start is End+1,
+		retractall(new_primes(_)),
+		asserta(new_primes([])),
+		once(
+			for (I, Start0, End),
+				once(
+					LogN is log(I),
+					LogLogN is log(LogN),
+					Max is floor(LogN * LogLogN / log(2.0)),
+					member(Prime, LX),
+						(
+							once(Prime > Max),
+							(
+								new_primes(LL),
+								append(LL, [I], L1),
+								retract(new_primes(_)),
+								asserta(new_primes(L1)),
+								!
+							);
+							(
+								\+ once(is_strong_pseudo_prime(I, Prime)), !, fail
+							)
+						)
+				),
+				fail
+			;
+			true
+		),
+		once(
+			set_iteration_star_packet(3),
+			*for (I, Start, N){
+				once(
+					LogN is log(I),
+					LogLogN is log(LogN),
+					Max is floor(LogN * LogLogN / log(2.0)),
+					member(Prime, LX),
+						(
+							once(Prime > Max),
+							(
+								new_primes(LL),
+								append(LL, [I], L1),
+								retract(new_primes(_)),
+								asserta(new_primes(L1)),
+								!
+							);
+							(
+								\+ once(is_strong_pseudo_prime(I, Prime)), !, fail
+							)
+						)
+				),
+				fail
+			};
+			true
+		),
+		new_primes(Concat),
+		append(L, Concat, FOUND),
+		retractall(primes(_)),
+		retractall(new_primes(_)),
+		asserta(primes(FOUND)).
