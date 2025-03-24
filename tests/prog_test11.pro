@@ -87,7 +87,7 @@
 
 	run20 :- member(A,[1,2,3,4,5]), { write(A) }, fail; {&}.
 
-	run21 :- *for(I,1,20){write(I),(*for(A,1,3){write(x),fail};true)}.
+	run21 :- *for(I,1,20){write(I),*for(A,1,3){write(x),fail};true}.
 
 	run22 :- *for(I,1,20){write(I)},write(I).
 
@@ -96,21 +96,21 @@
 	run23a(4) :- member(_,[1,2]).
 	run23a(2) :- write(b).
 
-	run23 :- *run23a(A){write(A)}.
+	run23 :- *run23a(A){write(A),fail}.
 
 	run24a(1) :- fail.
 
 	run24 :- *run24a(A){write(A)}.
 
-	run25 :- member(X,[1,2,3]),write(X),*repeat{write(x)},fail.
+	run25 :- member(X,[1,2,3]),write(X),*for(A,1,3){write(x)},fail.
 
-	run26 :- {*member(A,[1,2,3]){{write(A)},{&}}},{&}.
+	run26 :- {*member(A,[1,2,3]){{write(A)},{&}},write(x),write(A),fail; true},{&}.
 
 	run27 :- asserta(num(x)),retractall(num(_)),*member(A,[1,2,3,4,5]){asserta(num(A)),A>3},num(X),write(X),fail.
 
 	run28 :- *member(A,[1,2,3]){write(x)},write(A).
 
-	run29 :- g_assign('C', 0), member(A,[1,2,3]),*repeat{g_read('C',C),write(C),C1 is C+1,g_assign('C',C1)},write(' '),write(C),fail.
+	run29 :- g_assign('C', 0), *member(A,[1,2,3]){g_read('C',C),write(C),C1 is C+1,g_assign('C',C1)},write(' '),write(C),fail.
 
 	run30 :- g_assign('C', 0), *repeat{g_read('C',C),C1 is C+1,g_assign('C',C1),write(C),C>4}, write(' '), write(C).
 
@@ -124,6 +124,10 @@
 	run33 :- simples_miller(400, 1), primes(P), write(P).
 
 	run34 :- simples_miller(400, 0), primes(P), write(P).
+
+	run35 :- {*member(A,[1,2,3]){{write(A)},{&},A>1,!},write(x),write(A),fail; true},{&}.
+
+	run36 :- g_assign('S',[]),*?run23a(A){g_read('S',S),append(S,[A],S1),g_assign('S',S1),fail};g_read('S',S),write(S).
 
 	generate_facts(This,N):-
 		>(This,N),
@@ -311,6 +315,19 @@
 			true
 		).
 
+	gcd1(A,A,A).
+	gcd1(A,0,A).
+	gcd1(0,A,A).
+	gcd1(A,B,GCD):-
+		A>B, A1 is A-B, gcd1(A1,B,GCD).
+	gcd1(A,B,GCD):-
+		A<B, B1 is B-A, gcd1(A,B1,GCD).
+
+	gcd(A,B,GCD) :-
+		A1 is abs(A),
+		B1 is abs(B),
+		once(gcd1(A1, B1, GCD)).
+
 	mod_pow(_, 0, 1, 0).
 	mod_pow(_, 0, _, 1).
 	mod_pow(A, P, N, Result) :-
@@ -319,6 +336,13 @@
 		D is floor(A*R1/N),
 		R is round(A*R1 - D*N),
 		=(Result, R).
+
+	is_power_of_number(N) :-
+		N1 is N-1,
+		mod_pow(2, N1, N, R),
+		R1 is R-1,
+		gcd(R1, N, R2),
+		R2 < 2.
 
 	is_strong_pp_loop(Exp, Ost_1, I, L) :-
 		Exp1 is floor(Exp / 2),
@@ -363,6 +387,7 @@
 					LogN is log(I),
 					LogLogN is log(LogN),
 					Max is floor(LogN * LogLogN / log(2.0)),
+					\+ is_power_of_number(I),
 					member(Prime, LX),
 						(
 							once(Prime > Max),
@@ -384,11 +409,12 @@
 		),
 		once(
 			set_iteration_star_packet(3),
-			*for (I, Start, N){
+			*?for (I, Start, N){
 				once(
 					LogN is log(I),
 					LogLogN is log(LogN),
 					Max is floor(LogN * LogLogN / log(2.0)),
+					\+ is_power_of_number(I),
 					member(Prime, LX),
 						(
 							once(Prime > Max),
