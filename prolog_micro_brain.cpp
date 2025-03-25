@@ -2357,7 +2357,6 @@ bool context::join(bool sequential_mode, int K, frame_item* f, interpreter* INTR
 		for (int i = 0; i < CONTEXTS.size(); i++)
 			if (stoppeds[i] || rollback[i]) {
 				if (rollback[i] || other_winners.find(i) == other_winners.end() && other_winners.find(-i) == other_winners.end()) {
-					tframe_item* OLD = CONTEXTS[i]->FRAME.load();
 					if (CONTEXTS[i]->transactable_facts) { // Undo facts
 						std::unique_lock<std::mutex> lock(*DBLOCK);
 						std::unique_lock<std::mutex> ilock(*CONTEXTS[i]->DBLOCK);
@@ -2417,13 +2416,13 @@ bool context::join(bool sequential_mode, int K, frame_item* f, interpreter* INTR
 					}
 					else {
 						FRAMES_TO_DELETE.push(CONTEXTS[i]->FRAME.load());
-						if (sequential >= 0) {
+						// if (sequential >= 0) {
 							tframe_item* newf = CONTEXTS[i]->INIT.load()->tcopy(this, INTRP);
 							newf->forced_import_transacted_globs(this, f);
 							CONTEXTS[i]->FRAME.store(newf);
-						}
-						else
-							CONTEXTS[i]->FRAME.store(f->tcopy(this, INTRP, false));
+						// }
+						// else
+						//	CONTEXTS[i]->FRAME.store(f->tcopy(this, INTRP, false));
 						CONTEXTS[i]->set_rollback(false);
 						{
 							std::lock_guard<std::mutex> lk(CONTEXTS[i]->THR->get_stopped_mutex());
@@ -2643,7 +2642,7 @@ generated_vars * predicate_item_user::generate_variants(context * CTX, frame_ite
 bool predicate_item_user::processing(context * CONTEXT, bool line_neg, int variant, generated_vars * variants, vector<value *> ** positional_vals, frame_item * up_f, context * up_c) {
 	predicate_item * next = get_next(variant);
 
-	frame_item* f = new frame_item(32, 8, CONTEXT, up_f);
+	frame_item* f = dynamic_cast<tframe_item *>(up_f) ? new tframe_item(32, 8, CONTEXT, up_f) : new frame_item(32, 8, CONTEXT, up_f);
 
 	/**/
 	if (variant == 0) {
@@ -8703,6 +8702,9 @@ bool interpreter::process(context * CONTEXT, bool neg, clause * this_clause, pre
 								CNT->CTXS.push(up_c);
 								CNT->NEGS.push(next_neg);
 								CNT->_FLAGS.push(_flags);
+
+								if (ff && _up_ff)
+									ff->sync(false, false, CNT, _up_ff);
 							}
 							if (next_args) {
 								for (int j = 0; j < next_args->size(); j++)
@@ -9889,101 +9891,6 @@ interpreter::interpreter(const string & fname, const string & starter_name) {
 	xpath_loaded = false;
 
 	forking = false;
-
-	MAP["append"] = id_append;
-	MAP["sublist"] = id_sublist;
-	MAP["delete"] = id_delete;
-	MAP["member"] = id_member;
-	MAP["last"] = id_last;
-	MAP["reverse"] = id_reverse;
-	MAP["for"] = id_for;
-	MAP["length"] = id_length;
-	MAP["max_list"] = id_max_list;
-	MAP["atom_length"] = id_atom_length;
-	MAP["nth"] = id_nth;
-	MAP["page_id"] = id_page_id;
-	MAP["thread_id"] = id_thread_id;
-	MAP["atom_concat"] = id_atom_concat;
-	MAP["atom_chars"] = id_atom_chars;
-	MAP["atom_codes"] = id_atom_codes;
-	MAP["atom_hex"] = id_atom_hex;
-	MAP["atom_hexs"] = id_atom_hexs;
-	MAP["number_atom"] = id_number_atom;
-	MAP["number"] = id_number;
-	MAP["consistency"] = id_consistency;
-	MAP["listing"] = id_listing;
-	MAP["current_predicate"] = id_current_predicate;
-	MAP["findall"] = id_findall;
-	MAP["functor"] = id_functor;
-	MAP["predicate_property"] = id_predicate_property;
-	MAP["$predicate_property_pi"] = id_spredicate_property_pi;
-	MAP["eq"] = id_eq;
-	MAP["="] = id_eq;
-	MAP["=="] = id_eq;
-	MAP["neq"] = id_neq;
-	MAP["\\="] = id_neq;
-	MAP["less"] = id_less;
-	MAP["<"] = id_less;
-	MAP["greater"] = id_greater;
-	MAP[">"] = id_greater;
-	MAP["term_split"] = id_term_split;
-	MAP["=.."] = id_term_split;
-	MAP["g_assign"] = id_g_assign;
-	MAP["g_assign_nth"] = id_g_assign_nth;
-	MAP["g_read"] = id_g_read;
-	MAP["fail"] = id_fail;
-	MAP["true"] = id_true;
-	MAP["change_directory"] = id_change_directory;
-	MAP["open"] = id_open;
-	MAP["close"] = id_close;
-	MAP["get_char"] = id_get_char;
-	MAP["peek_char"] = id_peek_char;
-	MAP["read_token"] = id_read_token;
-	MAP["read_token_from_atom"] = id_read_token_from_atom;
-	MAP["mars"] = id_mars;
-	MAP["mars_decode"] = id_mars_decode;
-	MAP["unset"] = id_unset;
-	MAP["write"] = id_write;
-	MAP["write_to_atom"] = id_write_to_atom;
-	MAP["write_term"] = id_write_term;
-	MAP["write_term_to_atom"] = id_write_term_to_atom;
-	MAP["nl"] = id_nl;
-	MAP["file_exists"] = id_file_exists;
-	MAP["unlink"] = id_unlink;
-	MAP["rename_file"] = id_rename_file;
-	MAP["seeing"] = id_seeing;
-	MAP["telling"] = id_telling;
-	MAP["seen"] = id_seen;
-	MAP["told"] = id_told;
-	MAP["see"] = id_see;
-	MAP["tell"] = id_tell;
-	MAP["set_iteration_star_packet"] = id_set_iteration_star_packet;
-	MAP["repeat"] = id_repeat;
-	MAP["random"] = id_random;
-	MAP["randomize"] = id_randomize;
-	MAP["char_code"] = id_char_code;
-	MAP["get_code"] = id_get_code;
-	MAP["at_end_of_stream"] = id_at_end_of_stream;
-	MAP["open_url"] = id_open_url;
-	MAP["track_post"] = id_track_post;
-	MAP["consult"] = id_consult;
-	MAP["assert"] = id_assert;
-	MAP["asserta"] = id_asserta;
-	MAP["assertz"] = id_assertz;
-	MAP["retract"] = id_retract;
-	MAP["retractall"] = id_retractall;
-	MAP["inc"] = id_inc;
-	MAP["halt"] = id_halt;
-	MAP["load_classes"] = id_load_classes;
-	MAP["init_xpathing"] = id_init_xpathing;
-	MAP["induct_xpathing"] = id_induct_xpathing;
-	MAP["import_model_after_induct"] = id_import_model_after_induct;
-	MAP["unload_classes"] = id_unload_classes;
-	MAP["var"] = id_var;
-	MAP["nonvar"] = id_nonvar;
-	MAP["get_icontacts"] = id_get_icontacts;
-	MAP["get_ocontacts"] = id_get_ocontacts;
-	MAP["rollback"] = id_rollback;
 
 	CONTEXT = new context(false, false, NULL, 50000, NULL, NULL, NULL, NULL, this);
 

@@ -353,7 +353,102 @@ public:
 	std::mutex VARLOCK;
 	unsigned int ITERATION_STAR_PACKET;
 
-	map<string, ids> MAP;
+	map<string, ids> MAP{
+		{ "append", id_append },
+		{ "sublist", id_sublist },
+		{ "delete", id_delete },
+		{ "member", id_member },
+		{ "last", id_last },
+		{ "reverse", id_reverse },
+		{ "for", id_for },
+		{ "length", id_length },
+		{ "max_list", id_max_list },
+		{ "atom_length", id_atom_length },
+		{ "nth", id_nth },
+		{ "page_id", id_page_id },
+		{ "thread_id", id_thread_id },
+		{ "atom_concat", id_atom_concat },
+		{ "atom_chars", id_atom_chars },
+		{ "atom_codes", id_atom_codes },
+		{ "atom_hex", id_atom_hex },
+		{ "atom_hexs", id_atom_hexs },
+		{ "number_atom", id_number_atom },
+		{ "number", id_number },
+		{ "consistency", id_consistency },
+		{ "listing", id_listing },
+		{ "current_predicate", id_current_predicate },
+		{ "findall", id_findall },
+		{ "functor", id_functor },
+		{ "predicate_property", id_predicate_property },
+		{ "$predicate_property_pi", id_spredicate_property_pi },
+		{ "eq", id_eq },
+		{ "=", id_eq },
+		{ "==", id_eq },
+		{ "neq", id_neq },
+		{ "\\=", id_neq },
+		{ "less", id_less },
+		{ "<", id_less },
+		{ "greater", id_greater },
+		{ ">", id_greater },
+		{ "term_split", id_term_split },
+		{ "=..", id_term_split },
+		{ "g_assign", id_g_assign },
+		{ "g_assign_nth", id_g_assign_nth },
+		{ "g_read", id_g_read },
+		{ "fail", id_fail },
+		{ "true", id_true },
+		{ "change_directory", id_change_directory },
+		{ "open", id_open },
+		{ "close", id_close },
+		{ "get_char", id_get_char },
+		{ "peek_char", id_peek_char },
+		{ "read_token", id_read_token },
+		{ "read_token_from_atom", id_read_token_from_atom },
+		{ "mars", id_mars },
+		{ "mars_decode", id_mars_decode },
+		{ "unset", id_unset },
+		{ "write", id_write },
+		{ "write_to_atom", id_write_to_atom },
+		{ "write_term", id_write_term },
+		{ "write_term_to_atom", id_write_term_to_atom },
+		{ "nl", id_nl },
+		{ "file_exists", id_file_exists },
+		{ "unlink", id_unlink },
+		{ "rename_file", id_rename_file },
+		{ "seeing", id_seeing },
+		{ "telling", id_telling },
+		{ "seen", id_seen },
+		{ "told", id_told },
+		{ "see", id_see },
+		{ "tell", id_tell },
+		{ "set_iteration_star_packet", id_set_iteration_star_packet },
+		{ "repeat", id_repeat },
+		{ "random", id_random },
+		{ "randomize", id_randomize },
+		{ "char_code", id_char_code },
+		{ "get_code", id_get_code },
+		{ "at_end_of_stream", id_at_end_of_stream },
+		{ "open_url", id_open_url },
+		{ "track_post", id_track_post },
+		{ "consult", id_consult },
+		{ "assert", id_assert },
+		{ "asserta", id_asserta },
+		{ "assertz", id_assertz },
+		{ "retract", id_retract },
+		{ "retractall", id_retractall },
+		{ "inc", id_inc },
+		{ "halt", id_halt },
+		{ "load_classes", id_load_classes },
+		{ "init_xpathing", id_init_xpathing },
+		{ "induct_xpathing", id_induct_xpathing },
+		{ "import_model_after_induct", id_import_model_after_induct },
+		{ "unload_classes", id_unload_classes },
+		{ "var", id_var },
+		{ "nonvar", id_nonvar },
+		{ "get_icontacts", id_get_icontacts },
+		{ "get_ocontacts", id_get_ocontacts },
+		{ "rollback", id_rollback }
+	};
 
 	string CLASSES_ROOT;
 	string INDUCT_MODE;
@@ -910,10 +1005,12 @@ class tframe_item : public frame_item {
 
 	std::mutex mutex;
 public:
-	tframe_item(unsigned int _name_capacity = 32, unsigned int _vars_capacity = 5) : frame_item(_name_capacity, _vars_capacity) {
+	tframe_item(unsigned int _name_capacity = 32, unsigned int _vars_capacity = 5, context* CTX = NULL, frame_item* inheriting = NULL) : frame_item(_name_capacity, _vars_capacity) {
 		creation = clock();
 		info_capacity = _vars_capacity;
 		info_vars = (var_info*)malloc(info_capacity * sizeof(var_info));
+
+		import_transacted_globs(CTX, inheriting);
 	}
 
 	virtual ~tframe_item();
