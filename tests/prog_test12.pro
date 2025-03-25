@@ -63,8 +63,27 @@ generate_1(MIN,MAX,L):-
    g_read('L',L)
   ).
 
+generate_2(MIN,MAX,L):-
+  g_assign('&L',[]),
+  once(
+   for(A,MIN,MAX),
+     *{
+      once(check(A)), % Проверяем текущее число
+      *(
+        g_read('&L',L0),
+        append(L0, [A], L1),
+        g_assign('&L', L1)
+      )
+     },
+     fail;
+   {=0}, g_read('&L',L)
+  ).
+
 run1:-
   generate_1(300, 600, L), write(L).
 
 run2:-
+  generate_2(300, 600, L), write(L).
+
+run3:-
   generate(300, 600, L), write(L).
