@@ -20,9 +20,6 @@ using namespace std;
 
 #include "elements.h"
 
-extern bool fast_memory_manager;
-extern unsigned int mem_block_size;
-
 extern const char * STD_INPUT;
 extern const char * STD_OUTPUT;
 
@@ -31,11 +28,6 @@ const int call_flag = 0x2;
 
 unsigned long long getTotalSystemMemory();
 unsigned int getTotalProcs();
-
-void * __alloc(size_t size, unsigned short int tid);
-void* __realloc(void* ptr, size_t old_size, size_t size, unsigned short int tid);
-unsigned short int thread_id_hash(const std::thread::id& id);
-void __free(void* ptr, unsigned short int tid);
 
 #ifdef __linux__
 #include <sys/resource.h>
@@ -93,13 +85,10 @@ public:
 	value() { refs = 1; }
 
 	virtual void use() { refs++; }
-	virtual void free(unsigned short int tid) {
+	virtual void free() {
 		refs--;
 		if (refs == 0) {
-			if (fast_memory_manager)
-				__free(this, tid);
-			else
-				::operator delete(this);
+			delete(this);
 		}
 	}
 
@@ -107,13 +96,13 @@ public:
 
 	virtual value* fill(context* CTX, frame_item* vars) = 0;
 	virtual value* copy(context* CTX, frame_item* f, int unwind = 0) = 0;
-	virtual value* const_copy(context* CTX, frame_item* f) {
+	virtual value* const_copy(context* CTX, frame_item* f, int unwind = 0) {
 		if (this->defined()) {
 			this->use();
 			return this;
 		}
 		else
-			return copy(CTX, f);
+			return copy(CTX, f, unwind);
 	}
 	virtual bool unify(context* CTX, frame_item* ff, value* from) = 0;
 	virtual bool defined() = 0;
@@ -132,32 +121,6 @@ public:
 
 	virtual void write(basic_ostream<char>* outs, bool simple = false) {
 		(*outs) << to_str(simple);
-	}
-
-	void* operator new (size_t size, unsigned short int tid) {
-		if (fast_memory_manager)
-			return __alloc(size, tid);
-		else {
-			void* ptr = ::operator new(size);
-			//			cout<<"new:"<<ptr<<endl;
-			return ptr;
-		}
-	}
-
-	void operator delete (void* ptr, unsigned short int) {
-		//	cout << "del:" << ptr << endl;
-		if (fast_memory_manager)
-			__free(ptr, 0);
-		else
-			::operator delete(ptr);
-	}
-
-	void operator delete (void* ptr) {
-		//	cout << "del:" << ptr << endl;
-		if (fast_memory_manager)
-			__free(ptr, 0);
-		else
-			::operator delete(ptr);
 	}
 };
 
@@ -190,8 +153,6 @@ public:
 	virtual void set_rollback(bool val) {
 		rollback = val;
 	}
-
-	std::atomic<unsigned short int> tid;
 
 	context* parent;
 	interpreter* prolog;
@@ -558,9 +519,9 @@ public:
 
 class stack_values : public stack_container<value *> {
 public:
-	virtual void free(short unsigned int tid) {
+	virtual void free() {
 		for (int i = 0; i < this->size(); i++)
-			at(i)->free(tid);
+			at(i)->free();
 	}
 };
 
@@ -782,8 +743,8 @@ public:
 		bool found = false;
 		int it = find(name, found);
 		if (found) {
-			if (vars[it].ptr) vars[it].ptr->free(CTX->tid);
-			vars[it].ptr = v ? v->copy(CTX, this) : NULL;
+			if (vars[it].ptr) vars[it].ptr->free();
+			vars[it].ptr = v ? v->const_copy(CTX, this) : NULL;
 		}
 		else {
 			char * oldp = &names[0];
@@ -805,7 +766,7 @@ public:
 				vars[i]._name += newp - oldp;
 			char * _name = newp + oldn;
 			strcpy(_name, name);
-			mapper m = { _name, v ? v->copy(CTX, this) : NULL };
+			mapper m = { _name, v ? v->const_copy(CTX, this) : NULL };
 			vars.insert(vars.begin() + it, m);
 		}
 	}
@@ -1039,7 +1000,7 @@ public:
 				vars[i]._name += newp - oldp;
 			char* _name = newp + oldn;
 			strcpy(_name, name);
-			mapper m = { _name, v ? v->copy(CTX, this) : NULL };
+			mapper m = { _name, v ? v->const_copy(CTX, this) : NULL };
 			vars.insert(vars.begin() + it, m);
 			if (vars.size() > info_capacity) {
 				int _info_capacity = info_capacity;
@@ -1052,8 +1013,8 @@ public:
 		}
 		else {
 			if (vars[it].ptr)
-				vars[it].ptr->free(CTX->tid);
-			vars[it].ptr = v ? v->copy(CTX, this) : NULL;
+				vars[it].ptr->free();
+			vars[it].ptr = v ? v->const_copy(CTX, this) : NULL;
 		}
 		if (set_time_zero) {
 			info_vars[it] = var_info_zero;
@@ -1326,9 +1287,8 @@ public:
 		conditional_star_mode(false), is_starred(false) { }
 
 	virtual ~predicate_item() {
-		unsigned short int tid = thread_id_hash(std::this_thread::get_id());
 		for (value * v : _args)
-			v->free(tid);
+			v->free();
 	}
 
 	virtual void set_starred_end(int end) {
@@ -1521,7 +1481,7 @@ public:
 
 	virtual ~journal_item() {
 		if (this->type == jDelete)
-			this->data->free(thread_id_hash(std::this_thread::get_id()));
+			this->data->free();
 	}
 };
 
