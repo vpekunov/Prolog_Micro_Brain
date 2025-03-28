@@ -483,7 +483,8 @@ frame_item::~frame_item() {
 
 tframe_item::~tframe_item() {
 	lock();
-	free(info_vars);
+	if (info_vars != micro_info)
+		free(info_vars);
 	unlock();
 }
 
@@ -558,7 +559,7 @@ void tthread::reinit(int _id, context* CTX) {
 	stopped.store(false);
 
 	if (CTX) {
-		std::lock_guard<std::mutex> lk(cv_m);
+		std::lock_guard<fastmux> lk(cv_m);
 		CONTEXT.store(CTX);
 		cv.notify_one();
 	}
@@ -571,7 +572,7 @@ void tthread::reinit(int _id, context* CTX) {
 tthread::~tthread() {
 	allow_stop.store(true);
 	{
-		std::lock_guard<std::mutex> lk(cv_m);
+		std::lock_guard<fastmux> lk(cv_m);
 		CONTEXT.store((context*)1);
 		cv.notify_one();
 	}
@@ -600,23 +601,23 @@ void tthread::body() {
 			}
 
 			{
-				std::lock_guard<std::mutex> lk(cvf_m);
+				std::lock_guard<fastmux> lk(cvf_m);
 				set_stopped(true);
 				cvf.notify_one();
 			}
 
-			std::unique_lock<std::mutex> lk(cvs_m);
+			std::unique_lock<fastmux> lk(cvs_m);
 			while (is_stopped())
 				cvs.wait(lk);
 		} while (!is_terminated());
 
 		{
-			std::lock_guard<std::mutex> lk(cvt_m);
+			std::lock_guard<fastmux> lk(cvt_m);
 			set_terminated(false);
 			cvt.notify_one();
 		}
 
-		std::unique_lock<std::mutex> lk(cv_m);
+		std::unique_lock<fastmux> lk(cv_m);
 		while (NULL == CONTEXT.load()) {
 			cv.wait(lk);
 		}
@@ -629,7 +630,6 @@ void frame_item::register_fact_group(bool _locked, context* CTX, string& fact, j
 	int it = find(fact.c_str(), found);
 	if (!found) {
 		set(_locked, CTX, fact.c_str(), NULL);
-		it = find(fact.c_str(), found);
 	}
 }
 
@@ -683,7 +683,7 @@ class string_atomizer {
 	map<string, unsigned int> hash;
 	vector<const string *> table;
 	bool forking;
-	std::mutex locker;
+	fastmux locker;
 public:
 	string_atomizer() { forking = false; }
 	void set_forking(bool v) { forking = v; }
@@ -1784,10 +1784,10 @@ context::context(bool locals_in_forked, bool transactable_facts, predicate_item*
 		DBJournal = parent->DBJournal;
 	}
 	else {
-		DBLOCK = new std::mutex();
+		DBLOCK = new fastmux();
 		DB = new map< string, std::atomic<vector<term*>*>>();
 		if (parent) {
-			std::unique_lock<std::mutex> lock(*parent->DBLOCK);
+			std::unique_lock<fastmux> lock(*parent->DBLOCK);
 			map< string, std::atomic<vector<term*>*>>::iterator itd = parent->DB->begin();
 			while (itd != parent->DB->end()) {
 				if (itd->second) {
@@ -1828,7 +1828,7 @@ context::context(bool locals_in_forked, bool transactable_facts, predicate_item*
 }
 
 context* context::add_page(bool locals_in_forked, bool transactable_facts, predicate_item* forker, tframe_item* f, predicate_item* starting, predicate_item* ending, interpreter* prolog) {
-	std::unique_lock<std::mutex> plock(pages_mutex);
+	std::unique_lock<fastmux> plock(pages_mutex);
 
 	context* result = new context(locals_in_forked, transactable_facts, forker, 100, this, f, starting, ending, prolog);
 
@@ -1892,7 +1892,7 @@ void context::apply_transactional_db_to_parent(const std::string & fact) {
 }
 
 bool context::join(bool sequential_mode, int K, frame_item* f, interpreter* INTRP, int & sequential, vector<frame_item *> * rest) {
-	std::unique_lock<std::mutex> lock(pages_mutex);
+	std::unique_lock<fastmux> lock(pages_mutex);
 	if (CONTEXTS.size() == 0) {
 		lock.unlock();
 		return true;
@@ -1933,7 +1933,7 @@ bool context::join(bool sequential_mode, int K, frame_item* f, interpreter* INTR
 			for (int i = 0; i < CONTEXTS.size(); i++)
 				if (!joineds[i] && !stoppeds[i] && !rollback[i]) {
 					{
-						std::unique_lock<std::mutex> lk(CONTEXTS[i]->THR->get_finished_mutex());
+						std::unique_lock<fastmux> lk(CONTEXTS[i]->THR->get_finished_mutex());
 						while (!CONTEXTS[i]->THR->is_stopped())
 							CONTEXTS[i]->THR->get_finished_var().wait(lk);
 					}
@@ -1957,9 +1957,9 @@ bool context::join(bool sequential_mode, int K, frame_item* f, interpreter* INTR
 			for (int i = 0; i < CONTEXTS.size()-2; i++)
 				for (int j = i + 1; j < CONTEXTS.size()-1; j++)
 					if (stoppeds[i] && stoppeds[j] && (lnames[i].find(vname) != lnames[i].end() && lnames[j].find(vname) != lnames[j].end())) {
-						clock_t cri, fwi, fri, lwi, lri;
+						clock_rdtsc cri, fwi, fri, lwi, lri;
 						CONTEXTS[i]->FRAME.load()->statistics(vname, cri, fwi, fri, lwi, lri);
-						clock_t crj = 0, fwj = 0, frj = 0, lwj = 0, lrj = 0;
+						clock_rdtsc crj = 0, fwj = 0, frj = 0, lwj = 0, lrj = 0;
 						if (j == CONTEXTS.size() - 1 && dynamic_cast<tframe_item*>(f) == NULL)
 							/* M[i][j]++ */;
 						else {
@@ -2024,12 +2024,12 @@ bool context::join(bool sequential_mode, int K, frame_item* f, interpreter* INTR
 				}
 				int candidate = i;
 				if (parallels.size() > 1) {
-					clock_t min_time = 0;
+					clock_rdtsc min_time = 0;
 					if (!mainlined) parallels.insert(i);
 					for (const string& vname : names) {
 						for (int j : parallels) {
 							if (stoppeds[j] && lnames[j].find(vname) != lnames[j].end()) {
-								clock_t cr, fw, fr, lw, lr;
+								clock_rdtsc cr, fw, fr, lw, lr;
 								CONTEXTS[j]->FRAME.load()->statistics(vname, cr, fw, fr, lw, lr);
 								if (fw && (!min_time || fw < min_time && fw >= cr)) {
 									candidate = j;
@@ -2067,11 +2067,11 @@ bool context::join(bool sequential_mode, int K, frame_item* f, interpreter* INTR
 			if (sequential >= 0)
 				first_winner = sequential;
 			else {
-				clock_t min_time = 0;
+				clock_rdtsc min_time = 0;
 				for (const string& vname : conflictors) {
 					for (int i = 0; i < CONTEXTS.size(); i++)
 						if (stoppeds[i] && lnames[i].find(vname) != lnames[i].end()) {
-							clock_t cr, fw, fr, lw, lr;
+							clock_rdtsc cr, fw, fr, lw, lr;
 							CONTEXTS[i]->FRAME.load()->statistics(vname, cr, fw, fr, lw, lr);
 							if (fw && (!min_time || fw < min_time && fw >= cr)) {
 								first_winner = i;
@@ -2123,8 +2123,8 @@ bool context::join(bool sequential_mode, int K, frame_item* f, interpreter* INTR
 					if (vname[0] == '!') {
 						if (DB != CONTEXTS[winner]->DB) {
 							string fact = vname.substr(1);
-							std::unique_lock<std::mutex> dblock(*DBLOCK);
-							std::unique_lock<std::mutex> wdblock(*CONTEXTS[winner]->DBLOCK);
+							std::unique_lock<fastmux> dblock(*DBLOCK);
+							std::unique_lock<fastmux> wdblock(*CONTEXTS[winner]->DBLOCK);
 							CONTEXTS[winner]->apply_transactional_db_to_parent(fact);
 							wdblock.unlock();
 							dblock.unlock();
@@ -2165,8 +2165,8 @@ bool context::join(bool sequential_mode, int K, frame_item* f, interpreter* INTR
 			if (stoppeds[i] || rollback[i]) {
 				if (rollback[i] || other_winners.find(i) == other_winners.end() && other_winners.find(-i) == other_winners.end()) {
 					if (CONTEXTS[i]->transactable_facts) { // Undo facts
-						std::unique_lock<std::mutex> lock(*DBLOCK);
-						std::unique_lock<std::mutex> ilock(*CONTEXTS[i]->DBLOCK);
+						std::unique_lock<fastmux> lock(*DBLOCK);
+						std::unique_lock<fastmux> ilock(*CONTEXTS[i]->DBLOCK);
 						// Delete journal, including deleted nodes
 						map<string, std::atomic<journal*>>::iterator itj = CONTEXTS[i]->DBJournal->begin();
 						while (itj != CONTEXTS[i]->DBJournal->end()) {
@@ -2207,12 +2207,12 @@ bool context::join(bool sequential_mode, int K, frame_item* f, interpreter* INTR
 						CONTEXTS[i]->THR->set_context(NULL);
 						CONTEXTS[i]->THR->set_terminated(true);
 						{
-							std::lock_guard<std::mutex> lk(CONTEXTS[i]->THR->get_stopped_mutex());
+							std::lock_guard<fastmux> lk(CONTEXTS[i]->THR->get_stopped_mutex());
 							CONTEXTS[i]->THR->set_stopped(false);
 							CONTEXTS[i]->THR->get_stopped_var().notify_one();
 						}
 						{
-							std::unique_lock<std::mutex> lk(CONTEXTS[i]->THR->get_terminated_mutex());
+							std::unique_lock<fastmux> lk(CONTEXTS[i]->THR->get_terminated_mutex());
 							while (CONTEXTS[i]->THR->is_terminated())
 								CONTEXTS[i]->THR->get_terminated_var().wait(lk);
 						}
@@ -2232,7 +2232,7 @@ bool context::join(bool sequential_mode, int K, frame_item* f, interpreter* INTR
 						//	CONTEXTS[i]->FRAME.store(f->tcopy(this, INTRP, false));
 						CONTEXTS[i]->set_rollback(false);
 						{
-							std::lock_guard<std::mutex> lk(CONTEXTS[i]->THR->get_stopped_mutex());
+							std::lock_guard<fastmux> lk(CONTEXTS[i]->THR->get_stopped_mutex());
 							CONTEXTS[i]->THR->set_stopped(false);
 							CONTEXTS[i]->THR->get_stopped_var().notify_one();
 						}
@@ -2242,12 +2242,12 @@ bool context::join(bool sequential_mode, int K, frame_item* f, interpreter* INTR
 					CONTEXTS[i]->THR->set_context(NULL);
 					CONTEXTS[i]->THR->set_terminated(true);
 					{
-						std::lock_guard<std::mutex> lk(CONTEXTS[i]->THR->get_stopped_mutex());
+						std::lock_guard<fastmux> lk(CONTEXTS[i]->THR->get_stopped_mutex());
 						CONTEXTS[i]->THR->set_stopped(false);
 						CONTEXTS[i]->THR->get_stopped_var().notify_one();
 					}
 					{
-						std::unique_lock<std::mutex> lk(CONTEXTS[i]->THR->get_terminated_mutex());
+						std::unique_lock<fastmux> lk(CONTEXTS[i]->THR->get_terminated_mutex());
 						while (CONTEXTS[i]->THR->is_terminated())
 							CONTEXTS[i]->THR->get_terminated_var().wait(lk);
 					}
@@ -2409,7 +2409,7 @@ generated_vars * predicate_item_user::generate_variants(context * CTX, frame_ite
 				dummy->add_arg(CTX, f, positional_vals->at(j));
 			}
 		}
-		std::unique_lock<std::mutex> lock(*CTX->DBLOCK);
+		std::unique_lock<fastmux> lock(*CTX->DBLOCK);
 		map<string, std::atomic<vector<term*>*>>::iterator it = CTX->DB->find(iid);
 		if (dummy && it != CTX->DB->end()) {
 			CTX->register_db_read(iid);
@@ -2449,7 +2449,7 @@ generated_vars * predicate_item_user::generate_variants(context * CTX, frame_ite
 bool predicate_item_user::processing(context * CONTEXT, bool line_neg, int variant, generated_vars * variants, vector<value *> ** positional_vals, frame_item * up_f, context * up_c) {
 	predicate_item * next = get_next(variant);
 
-	frame_item* f = dynamic_cast<tframe_item *>(up_f) ? new tframe_item(32, 8, CONTEXT, up_f) : new frame_item(32, 8, CONTEXT, up_f);
+	frame_item* f = dynamic_cast<tframe_item *>(up_f) ? new tframe_item(32, 5, CONTEXT, up_f) : new frame_item(32, 5, CONTEXT, up_f);
 
 	/**/
 	if (variant == 0) {
@@ -3264,7 +3264,7 @@ public:
 			frame_item * r = f->copy(CTX);
 			prolog->CLASSES_ROOT = t1->get_name();
 			prolog->SetXPathLoaded(true);
-			std::unique_lock<std::mutex> glock(prolog->GLOCK);
+			std::unique_lock<fastmux> glock(prolog->GLOCK);
 			prolog->GVars[string(nameObjFactID)] = t2->const_copy(CTX, r);
 			prolog->GVars[string(nameObjLinkID)] = t3->const_copy(CTX, r);
 			glock.unlock();
@@ -3376,10 +3376,10 @@ public:
 
 		string IDS = "";
 		int n_objs = 0;
-		std::unique_lock<std::mutex> glock(prolog->GLOCK);
+		std::unique_lock<fastmux> glock(prolog->GLOCK);
 		map<string, value *>::iterator itf = prolog->GVars.find("$ObjFactID");
 		if (itf != prolog->GVars.end()) {
-			std::unique_lock<std::mutex> lock(*CTX->DBLOCK);
+			std::unique_lock<fastmux> lock(*CTX->DBLOCK);
 			map< string, std::atomic<vector<term *> *>>::iterator itd = CTX->DB->find(itf->second->to_str());
 			if (itd != CTX->DB->end()) {
 				CTX->register_db_read(itd->first);
@@ -3464,7 +3464,7 @@ public:
 
 		auto assertz = [&](term * t) {
 			string atid = t->get_name();
-			std::unique_lock<std::mutex> lock(*CTX->DBLOCK);
+			std::unique_lock<fastmux> lock(*CTX->DBLOCK);
 			CTX->register_db_read(atid);
 			if (CTX->DB->find(atid) == CTX->DB->end())
 				(*CTX->DB)[atid] = new vector<term*>();
@@ -3475,7 +3475,7 @@ public:
 			terms->push_back(tt);
 			lock.unlock();
 
-			std::unique_lock<std::mutex> dbilock(prolog->DBILock);
+			std::unique_lock<fastmux> dbilock(prolog->DBILock);
 			if (prolog->DBIndicators.find(atid) == prolog->DBIndicators.end()) {
 				set<int> * inds = new set<int>;
 				inds->insert((int)t->get_args().size());
@@ -3497,7 +3497,7 @@ public:
 				string LinkFactID = dynamic_cast<term *>(_LinkFactID)->get_name();
 				wstring Lang;
 				S->LoadFromXML(Lang, utf8_to_wstring(FName));
-				std::unique_lock<std::mutex> lock(*CTX->DBLOCK);
+				std::unique_lock<fastmux> lock(*CTX->DBLOCK);
 				map<string, std::atomic<vector<term *>*>>::iterator it = CTX->DB->find(ObjFactID);
 				if (it != CTX->DB->end()) {
 					CTX->register_db_read(ObjFactID);
@@ -3558,7 +3558,7 @@ public:
 		term * t1 = dynamic_cast<term *>(positional_vals->at(0));
 
 		generated_vars * result = new generated_vars();
-		std::unique_lock<std::mutex> glock(prolog->GLOCK);
+		std::unique_lock<fastmux> glock(prolog->GLOCK);
 		value* OF = prolog->GVars[string(nameObjFactID)];
 		value* OL = prolog->GVars[string(nameObjLinkID)];
 		glock.unlock();
@@ -3750,7 +3750,7 @@ public:
 			r->set(false, CTX, new_name.c_str(), a2->const_copy(CTX, r));
 		}
 		else {
-			std::unique_lock<std::mutex> glock(prolog->GLOCK);
+			std::unique_lock<fastmux> glock(prolog->GLOCK);
 			std::map<std::string, value*>::iterator it = prolog->GVars.find(a1->get_name());
 			if (it != prolog->GVars.end())
 				it->second->free();
@@ -3799,7 +3799,7 @@ public:
 			}
 		}
 		else {
-			std::unique_lock<std::mutex> glock(prolog->GLOCK);
+			std::unique_lock<fastmux> glock(prolog->GLOCK);
 			::list* L = dynamic_cast<::list*>(prolog->GVars[a1->get_name()]);
 			if (L && L->set_nth((int)a2->get_value(), a3->const_copy(CTX, r)))
 				result->push_back(r);
@@ -3859,7 +3859,7 @@ public:
 			}
 		}
 		else {
-			std::unique_lock<std::mutex> glock(prolog->GLOCK);
+			std::unique_lock<fastmux> glock(prolog->GLOCK);
 			map<string, value*>::iterator it = prolog->GVars.find(a1->get_name());
 			if (it == prolog->GVars.end()) {
 				value* v = new int_number(0);
@@ -5710,7 +5710,7 @@ public:
 		frame_item * r = f->copy(CTX);
 		result->push_back(r);
 
-		std::unique_lock<std::mutex> lock(*CTX->DBLOCK);
+		std::unique_lock<fastmux> lock(*CTX->DBLOCK);
 		map< string, std::atomic<vector<term *> *>>::iterator it = CTX->DB->begin();
 		while (it != CTX->DB->end()) {
 			if (!t || it->first == t->get_name()) {
@@ -5757,7 +5757,7 @@ public:
 				std::cout << "current_predicate(A/n) has incorrect parameter!" << endl;
 				exit(-3);
 			}
-			std::unique_lock<std::mutex> lock(*CTX->DBLOCK);
+			std::unique_lock<fastmux> lock(*CTX->DBLOCK);
 			map< string, std::atomic<vector<term *> *>>::iterator it = CTX->DB->begin();
 			while (it != CTX->DB->end()) {
 				if (it->first == t->get_name()) {
@@ -5779,7 +5779,7 @@ public:
 			return NULL;
 		}
 
-		std::unique_lock<std::mutex> lock(*CTX->DBLOCK);
+		std::unique_lock<fastmux> lock(*CTX->DBLOCK);
 		map< string, std::atomic<vector<term *> *>>::iterator it = CTX->DB->begin();
 		value * t = dynamic_cast<value *>(positional_vals->at(0));
 		while (it != CTX->DB->end()) {
@@ -5848,7 +5848,7 @@ public:
 				exit(-3);
 			}
 		}
-		std::unique_lock<std::mutex> lock(*CTX->DBLOCK);
+		std::unique_lock<fastmux> lock(*CTX->DBLOCK);
 		if (t && CTX->DB->find(t->get_name()) != CTX->DB->end()) {
 			CTX->register_db_read(t->get_name());
 			vector<term *> * terms = (*CTX->DB)[t->get_name()];
@@ -5894,7 +5894,7 @@ public:
 	virtual generated_vars * _generate_variants(context * CTX, frame_item * f, term * signature, value * & prop) {
 		generated_vars * result = new generated_vars();
 
-		std::unique_lock<std::mutex> lock(prolog->DBILock);
+		std::unique_lock<fastmux> lock(prolog->DBILock);
 		map< string, set<int> *>::iterator it = prolog->DBIndicators.find(signature->get_name());
 		term * prop_val = new term("dynamic");
 		int n = (int)signature->get_args().size();
@@ -7141,7 +7141,7 @@ public:
 		}
 		generated_vars * result = new generated_vars();
 		frame_item * ff = f->copy(CTX);
-		srand((unsigned int)time(NULL) ^ (unsigned int)clock());
+		srand((unsigned int)time(NULL) ^ (unsigned int)__clock());
 		result->push_back(ff);
 
 		return result;
@@ -7325,7 +7325,7 @@ public:
 		}
 
 		string atid = t->get_name();
-		std::unique_lock<std::mutex> lock(*CTX->DBLOCK);
+		std::unique_lock<fastmux> lock(*CTX->DBLOCK);
 		map<string, std::atomic<vector<term*>*>>::iterator it = CTX->DB->find(atid);
 		if (it == CTX->DB->end()) {
 			(*CTX->DB)[atid] = new vector<term*>();
@@ -7347,7 +7347,7 @@ public:
 
 		lock.unlock();
 
-		std::unique_lock<std::mutex> dbilock(prolog->DBILock);
+		std::unique_lock<fastmux> dbilock(prolog->DBILock);
 		if (prolog->DBIndicators.find(atid) == prolog->DBIndicators.end()) {
 			set<int> * inds = new set<int>;
 			inds->insert((int)t->get_args().size());
@@ -7386,7 +7386,7 @@ public:
 			exit(-3);
 		}
 
-		std::unique_lock<std::mutex> lock(*CTX->DBLOCK);
+		std::unique_lock<fastmux> lock(*CTX->DBLOCK);
 		map<string, std::atomic<vector<term*>*>>::iterator itdb = CTX->DB->find(t->get_name());
 		if (itdb == CTX->DB->end()) {
 			(*CTX->DB)[t->get_name()] = new vector<term*>();
@@ -7439,7 +7439,7 @@ public:
 	virtual bool execute(context * CTX, frame_item* &f, int i, generated_vars* variants) {
 		if (all) return true;
 
-		std::unique_lock<std::mutex> lock(*CTX->DBLOCK);
+		std::unique_lock<fastmux> lock(*CTX->DBLOCK);
 		f->lock();
 		string iid = ((term*)f->get(true, CTX, "$FUNCTOR$"))->get_name();
 		f->get(true, CTX, "$FUNCTOR$")->free();
@@ -9862,7 +9862,7 @@ int main(int argc, char ** argv) {
 		main_part++;
 	}
 
-	std::cout << "Prolog MicroBrain by V.V.Pekunov V0.23beta3" << endl;
+	std::cout << "Prolog MicroBrain by V.V.Pekunov V0.23beta4" << endl;
 	if (argc == main_part) {
 		interpreter prolog("", "");
 		std::cout << "  Enter 'halt.' or 'end_of_file' to exit." << endl << endl;
@@ -9936,7 +9936,12 @@ int main(int argc, char ** argv) {
 		interpreter prolog(argv[main_part+1], argv[main_part+2]);
 
 		if (prolog.loaded()) {
+			auto start = std::chrono::high_resolution_clock::now(); // Засекаем время
 			prolog.run();
+			auto end = std::chrono::high_resolution_clock::now(); // Засечка конечного времени
+			std::chrono::duration<double, std::ratio<1, 1>> elapsed = end - start; // Вычисляем длительность исполнения
+			std::cout << endl;
+			std::cout << "Elapsed: " << elapsed.count() << " sec." << std::endl;
 		}
 		else
 			std::cout << "Goal absent!" << endl;

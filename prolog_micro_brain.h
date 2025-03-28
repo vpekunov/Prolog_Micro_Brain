@@ -14,7 +14,6 @@
 #include <atomic>
 
 #include <stdlib.h>
-#include <time.h>
 
 using namespace std;
 
@@ -35,6 +34,14 @@ unsigned int getTotalProcs();
 #include <pthread.h>
 #include <dlfcn.h>
 
+#include <x86gprintrin.h>
+
+typedef unsigned long long clock_rdtsc;
+
+clock_rdtsc __clock() {
+	return __builtin_ia32_rdtsc();
+}
+
 typedef void * HMODULE;
 
 HMODULE LoadLibrary(const wchar_t * _fname) {
@@ -50,7 +57,16 @@ void FreeLibrary(HMODULE handle) {
 }
 #else
 #include <Windows.h>
+#include <intrin.h>
+
+typedef unsigned long long clock_rdtsc;
+clock_rdtsc __clock() {
+	return __rdtsc();
+}
+
 #endif
+
+typedef std::mutex fastmux;
 
 template<class T> class stack_container : public vector<T>{
 public:
@@ -172,7 +188,7 @@ public:
 	stack_container<predicate_item*> SEQ_END;
 	stack_container<tframe_item*> FRAMES_TO_DELETE;
 
-	std::mutex * DBLOCK;
+	fastmux * DBLOCK;
 	map< string, std::atomic<vector<term*>*>> * DB;
 	map<string, std::atomic<journal*>> * DBJournal;
 
@@ -196,7 +212,7 @@ public:
 	stack_container<predicate_item*> TRACERS;
 	stack_container<int> ptrTRACE;
 
-	std::mutex pages_mutex;
+	fastmux pages_mutex;
 
 	virtual context* add_page(bool locals_in_forked, bool transactable_facts, predicate_item * forker, tframe_item* f, predicate_item* starting, predicate_item* ending, interpreter* prolog);
 
@@ -311,7 +327,7 @@ public:
 	} ids;
 
 	thread_pool* THREAD_POOL;
-	std::mutex VARLOCK;
+	fastmux VARLOCK;
 	unsigned int ITERATION_STAR_PACKET;
 
 	map<string, ids> MAP{
@@ -415,13 +431,13 @@ public:
 	string INDUCT_MODE;
 
 	map<string, predicate *> PREDICATES;
-	std::mutex GLOCK;
+	fastmux GLOCK;
 	map<string, value *> GVars;
 	map<string, std::recursive_mutex *> STARLOCKS;
 	std::recursive_mutex STARLOCK;
 
 	map< string, set<int>*> DBIndicators;
-	std::mutex DBILock;
+	fastmux DBILock;
 
 	context* CONTEXT;
 
@@ -622,15 +638,40 @@ public:
 	int find(const char * what, bool & found) {
 		found = false;
 
-		if (vars.size() == 0)
+		int sz = (int)vars.size();
+
+		if (sz == 0)
 			return 0;
-		if (strcmp(what, vars[0]._name) < 0)
+		int n0 = strcmp(what, vars[0]._name);
+		if (n0 <= 0) {
+			found = n0 == 0;
 			return 0;
+		}
+		if (sz <= 4) {
+			if (sz == 1)
+				return 1;
+			int nn = strcmp(what, vars.back()._name);
+			if (nn >= 0) {
+				found = nn == 0;
+				return found ? sz - 1 : sz;
+			}
+			if (sz == 2)
+				return 1;
+			for (int i = 1; i < sz - 1; i++) {
+				int ni = strcmp(what, vars[i]._name);
+				if (ni <= 0) {
+					found = ni == 0;
+					return i;
+				}
+			}
+			return sz - 1;
+		}
+
 		if (strcmp(what, vars.back()._name) > 0)
 			return (int)vars.size();
 
 		int a = 0;
-		int b = (int)vars.size() - 1;
+		int b = sz - 1;
 		while (a < b) {
 			int c = (a + b) / 2;
 			int r = strcmp(what, vars[c]._name);
@@ -843,7 +884,7 @@ public:
 
 	virtual void register_facts(bool _locked, context* CTX, std::set<string>& names) {
 		bool locked = !_locked && lock();
-		std::unique_lock<std::mutex> lock(*CTX->DBLOCK);
+		std::unique_lock<fastmux> lock(*CTX->DBLOCK);
 		map<string, std::atomic<journal*>>::iterator it = CTX->DBJournal->begin();
 		while (it != CTX->DBJournal->end()) {
 			string fact = it->first;
@@ -856,7 +897,7 @@ public:
 
 	virtual void unregister_facts(bool _locked, context* CTX) {
 		bool locked = !_locked && lock();
-		std::unique_lock<std::mutex> lock(*CTX->DBLOCK);
+		std::unique_lock<fastmux> lock(*CTX->DBLOCK);
 		map<string, std::atomic<journal*>>::iterator it = CTX->DBJournal->begin();
 		while (it != CTX->DBJournal->end()) {
 			string fact = it->first;
@@ -880,17 +921,17 @@ class tthread {
 
 	volatile std::atomic<context*> CONTEXT;
 
-	std::condition_variable cv;
-	std::mutex cv_m;
+	std::condition_variable_any cv;
+	fastmux cv_m;
 
-	std::condition_variable cvs;
-	std::mutex cvs_m;
+	std::condition_variable_any cvs;
+	fastmux cvs_m;
 
-	std::condition_variable cvt;
-	std::mutex cvt_m;
+	std::condition_variable_any cvt;
+	fastmux cvt_m;
 
-	std::condition_variable cvf;
-	std::mutex cvf_m;
+	std::condition_variable_any cvf;
+	fastmux cvf_m;
 
 	std::thread * runner;
 public:
@@ -902,14 +943,14 @@ public:
 
 	void body();
 
-	virtual std::condition_variable& get_stopped_var() { return cvs; }
-	virtual std::mutex& get_stopped_mutex() { return cvs_m; }
+	virtual std::condition_variable_any& get_stopped_var() { return cvs; }
+	virtual fastmux& get_stopped_mutex() { return cvs_m; }
 
-	virtual std::condition_variable& get_terminated_var() { return cvt; }
-	virtual std::mutex& get_terminated_mutex() { return cvt_m; }
+	virtual std::condition_variable_any& get_terminated_var() { return cvt; }
+	virtual fastmux& get_terminated_mutex() { return cvt_m; }
 
-	virtual std::condition_variable& get_finished_var() { return cvf; }
-	virtual std::mutex& get_finished_mutex() { return cvf_m; }
+	virtual std::condition_variable_any& get_finished_var() { return cvf; }
+	virtual fastmux& get_finished_mutex() { return cvf_m; }
 
 	virtual context* get_context() { return CONTEXT; }
 	virtual void set_context(context* CTX) {
@@ -937,7 +978,7 @@ class thread_pool {
 private:
 	std::set<tthread*> available;
 	std::set<tthread*> used;
-	std::mutex guard;
+	fastmux guard;
 public:
 	thread_pool() { }
 
@@ -949,27 +990,35 @@ public:
 };
 
 class tframe_item : public frame_item {
+	static const int nn = 6;
+
 	friend class frame_item;
 	friend class journal;
 
 	typedef struct {
-		clock_t last_reads;
-		clock_t first_writes;
-		clock_t last_writes;
-		clock_t first_reads;
+		clock_rdtsc last_reads;
+		clock_rdtsc first_writes;
+		clock_rdtsc last_writes;
+		clock_rdtsc first_reads;
 	} var_info;
 
 	int info_capacity;
+	var_info micro_info[nn];
 	var_info* info_vars;
 
-	clock_t creation;
+	clock_rdtsc creation;
 
-	std::mutex mutex;
+	fastmux mutex;
 public:
 	tframe_item(unsigned int _name_capacity = 32, unsigned int _vars_capacity = 5, context* CTX = NULL, frame_item* inheriting = NULL) : frame_item(_name_capacity, _vars_capacity) {
-		creation = clock();
+		creation = __clock();
 		info_capacity = _vars_capacity;
-		info_vars = (var_info*)malloc(info_capacity * sizeof(var_info));
+		if (info_capacity <= nn) {
+			info_vars = micro_info;
+			info_capacity = nn;
+		}
+		else
+			info_vars = (var_info*)malloc(info_capacity * sizeof(var_info));
 
 		import_transacted_globs(CTX, inheriting);
 	}
@@ -1005,7 +1054,11 @@ public:
 			if (vars.size() > info_capacity) {
 				int _info_capacity = info_capacity;
 				info_capacity += 10;
-				info_vars = (var_info*)realloc(info_vars, /*_info_capacity * sizeof(var_info),*/ info_capacity * sizeof(var_info));
+				if (info_vars == micro_info) {
+					info_vars = (var_info*)malloc(/*_info_capacity * sizeof(var_info),*/ info_capacity * sizeof(var_info));
+					memmove(info_vars, micro_info, _info_capacity * sizeof(var_info));
+				} else
+					info_vars = (var_info*)realloc(info_vars, /*_info_capacity * sizeof(var_info),*/ info_capacity * sizeof(var_info));
 			}
 			for (int i = (int)vars.size() - 1; i > it; i--)
 				info_vars[i] = info_vars[i - 1];
@@ -1020,9 +1073,10 @@ public:
 			info_vars[it] = var_info_zero;
 		}
 		else {
+			clock_rdtsc c = __clock();
 			if (info_vars[it].first_writes == 0)
-				info_vars[it].first_writes = clock();
-			info_vars[it].last_writes = clock();
+				info_vars[it].first_writes = c;
+			info_vars[it].last_writes = c;
 		}
 		if (locked) unlock();
 	}
@@ -1034,9 +1088,10 @@ public:
 		int it = find(name, found);
 		if (found) {
 			result = vars[it].ptr;
+			clock_rdtsc c = __clock();
 			if (info_vars[it].first_reads == 0)
-				info_vars[it].first_reads = clock();
-			info_vars[it].last_reads = clock();
+				info_vars[it].first_reads = c;
+			info_vars[it].last_reads = c;
 		}
 		else if (unwind && name[0] == '$') {
 			result = frame_item::get(locked, CTX, name, unwind);
@@ -1059,13 +1114,14 @@ public:
 	virtual void register_write(const std::string & name) {
 		bool found = false;
 		int it = find(name.c_str(), found);
+		clock_rdtsc c = __clock();
 		if (found && info_vars[it].first_writes == 0)
-			info_vars[it].first_writes = clock();
+			info_vars[it].first_writes = c;
 		if (found)
-			info_vars[it].last_writes = clock();
+			info_vars[it].last_writes = c;
 	}
 
-	virtual clock_t first_write(const std::string& vname) {
+	virtual clock_rdtsc first_write(const std::string& vname) {
 		bool found = false;
 		int it = find(vname.c_str(), found);
 		if (found)
@@ -1074,7 +1130,7 @@ public:
 			return 0;
 	}
 
-	virtual clock_t last_read(const std::string& vname) {
+	virtual clock_rdtsc last_read(const std::string& vname) {
 		bool found = false;
 		int it = find(vname.c_str(), found);
 		if (found)
@@ -1083,7 +1139,7 @@ public:
 			return 0;
 	}
 
-	virtual clock_t first_read(const std::string& vname) {
+	virtual clock_rdtsc first_read(const std::string& vname) {
 		bool found = false;
 		int it = find(vname.c_str(), found);
 		if (found)
@@ -1092,7 +1148,7 @@ public:
 			return 0;
 	}
 
-	virtual clock_t last_write(const std::string& vname) {
+	virtual clock_rdtsc last_write(const std::string& vname) {
 		bool found = false;
 		int it = find(vname.c_str(), found);
 		if (found)
@@ -1111,7 +1167,7 @@ public:
 			}
 	}
 
-	virtual void statistics(const std::string & vname, clock_t & cr, clock_t &fw, clock_t &fr, clock_t &lw, clock_t &lr) {
+	virtual void statistics(const std::string & vname, clock_rdtsc & cr, clock_rdtsc &fw, clock_rdtsc &fr, clock_rdtsc &lw, clock_rdtsc &lr) {
 		bool found = false;
 		int it = find(vname.c_str(), found);
 		if (found) {
@@ -1216,7 +1272,7 @@ private:
 	std::list<string> args;
 	std::list<value *> _args;
 	vector<predicate_item *> items;
-	std::mutex mutex;
+	fastmux mutex;
 	bool forking;
 public:
 	clause(predicate * pp) : parent(pp), forking(false) { }
@@ -1279,7 +1335,7 @@ protected:
 	bool once;
 	bool call;
 
-	std::mutex mutex;
+	fastmux mutex;
 	std::recursive_mutex* critical;
 public:
 	predicate_item(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : neg(_neg), once(_once), call(_call),
@@ -1487,13 +1543,13 @@ public:
 
 class journal {
 public:
-	clock_t creation;
-	clock_t first_write, last_write, first_read, last_read;
+	clock_rdtsc creation;
+	clock_rdtsc first_write, last_write, first_read, last_read;
 
 	vector<journal_item*> log;
 
 	journal() {
-		creation = clock();
+		creation = __clock();
 
 		first_write = last_write = first_read = last_read = 0;
 	}
@@ -1504,9 +1560,10 @@ public:
 	}
 
 	virtual void register_read() {
+		clock_rdtsc c = __clock();
 		if (!first_read)
-			first_read = clock();
-		last_read = clock();
+			first_read = c;
+		last_read = c;
 	}
 
 	virtual void register_write(jTypes t, value* data, int position, journal * src = NULL) {
@@ -1521,10 +1578,11 @@ public:
 				last_read = src->last_read;
 		}
 		else {
+			clock_rdtsc c = __clock();
 			if (!first_write) {
-				first_write = clock();
+				first_write = c;
 			}
-			last_write = clock();
+			last_write = c;
 		}
 
 		log.push_back(new journal_item(t, data, position));

@@ -80,10 +80,10 @@ generate_2(MIN,MAX,L):-
   ).
 
 run1:-
-  generate_1(300, 600, L), write(L).
+  generate_1(600, 900, L), write(L).
 
 run2:-
-  generate_2(300, 600, L), write(L).
+  generate_2(600, 900, L), write(L).
 
 run3:-
-  generate(300, 600, L), write(L).
+  generate(600, 900, L), write(L).
