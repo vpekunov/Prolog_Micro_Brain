@@ -67,6 +67,11 @@ char * __ltoa(long long n, char s[], long long radix)
 
 #define __itoa __ltoa
 
+clock_rdtsc __clock() {
+	auto duration = std::chrono::system_clock().now().time_since_epoch();
+	return std::chrono::duration_cast<std::chrono::nanoseconds>(duration).count();
+}
+
 const char * std_lib_pro = "prolog_micro_brain.pro";
 
 const char * nameObjFactID = "$ObjFactID";
@@ -467,6 +472,59 @@ string unescape(const string & s) {
 	return result;
 }
 
+class string_atomizer {
+	map<string, unsigned int> hash;
+	vector<const string*> table;
+	bool forking;
+	fastmux locker;
+public:
+	string_atomizer() { forking = false; }
+	void set_forking(bool v) { forking = v; }
+	unsigned int get_atom(const string& s) {
+		if (s.length() == 1)
+			return (unsigned char)s[0];
+		else if (s.length() == 2)
+			return (((unsigned char)s[1]) << 8) + (unsigned char)s[0];
+		else {
+			if (forking) locker.lock();
+			unsigned int result = 0;
+			map<string, unsigned int>::iterator it = hash.find(s);
+			if (it != hash.end())
+				result = it->second;
+			else {
+				if (table.size() == table.capacity()) {
+					table.reserve(table.size() + 2000);
+				}
+				pair<map<string, unsigned int>::iterator, bool> itt =
+					hash.insert(pair<string, unsigned int>(s, 0));
+				table.push_back(&itt.first->first);
+				itt.first->second = (unsigned int)(65536 + table.size() - 1);
+				result = itt.first->second;
+			}
+			if (forking) locker.unlock();
+			return result;
+		}
+	}
+	const string get_string(unsigned int atom) {
+		if (atom < 256) {
+			char buf[2] = { (char)atom, 0 };
+			return string(buf);
+		}
+		else if (atom < 65536) {
+			char buf[3] = { (char)(atom & 0xFF), (char)(atom >> 8), 0 };
+			return string(buf);
+		}
+		else {
+			if (forking) locker.lock();
+			string result = *table[atom - 65536];
+			if (forking) locker.unlock();
+			return result;
+		}
+	}
+};
+
+string_atomizer atomizer;
+
 frame_item::~frame_item() {
 	int it = 0;
 	while (it < vars.size()) {
@@ -480,6 +538,34 @@ frame_item::~frame_item() {
 		free(deleted);
 }
 
+const string frame_item::atn(int i) {
+	return atomizer.get_string(get_name_code(*vars[i]._name));
+}
+
+void frame_item::register_facts(bool _locked, context* CTX, std::set<unsigned long long>& names) {
+	bool locked = !_locked && lock();
+	std::unique_lock<fastmux> lock(*CTX->DBLOCK);
+	map<unsigned long long, std::atomic<journal*>>::iterator it = CTX->DBJournal->begin();
+	while (it != CTX->DBJournal->end()) {
+		unsigned long long fact = it->first;
+		register_fact_group(locked, CTX, fact, it->second);
+		names.insert(fact);
+		it++;
+	}
+	if (locked) lock.unlock();
+}
+
+void frame_item::unregister_facts(bool _locked, context* CTX) {
+	bool locked = !_locked && lock();
+	std::unique_lock<fastmux> lock(*CTX->DBLOCK);
+	map<unsigned long long, std::atomic<journal*>>::iterator it = CTX->DBJournal->begin();
+	while (it != CTX->DBJournal->end()) {
+		unsigned long long fact = it->first;
+		unregister_fact_group(locked, CTX, fact);
+		it++;
+	}
+	if (locked) lock.unlock();
+}
 
 tframe_item::~tframe_item() {
 	lock();
@@ -509,7 +595,7 @@ tframe_item* frame_item::tcopy(context* CTX, interpreter* INTRP, bool import_glo
 				bool use_local_copy = false;
 				// find(new_name.c_str(), use_local_copy);
 				// if (!use_local_copy)
-				result->set(true, CTX, new_name.c_str(), it->second);
+				result->set(true, CTX, construct_var_name(0, atomizer.get_atom(new_name), '*'), it->second);
 			}
 			it++;
 		}
@@ -624,31 +710,37 @@ void tthread::body() {
 	} while (!allow_stop);
 }
 
-void frame_item::register_fact_group(bool _locked, context* CTX, string& fact, journal* J) {
+void frame_item::register_fact_group(bool _locked, context* CTX, unsigned long long& fact, journal* J) {
 	bool found = false;
-	fact.insert(0, 1, '!');
-	int it = find(fact.c_str(), found);
+	string _fact = atomizer.get_string(get_name_code(fact));
+	_fact.insert(0, 1, '!');
+	fact = construct_var_name(0, atomizer.get_atom(_fact), '!');
+	int it = find(fact, found);
 	if (!found) {
-		set(_locked, CTX, fact.c_str(), NULL);
+		set(_locked, CTX, fact, NULL);
 	}
 }
 
-void frame_item::unregister_fact_group(bool _locked, context* CTX, string& fact) {
+void frame_item::unregister_fact_group(bool _locked, context* CTX, unsigned long long& fact) {
 	bool found = false;
-	fact.insert(0, 1, '!');
-	int it = find(fact.c_str(), found);
+	string _fact = atomizer.get_string(get_name_code(fact));
+	_fact.insert(0, 1, '!');
+	fact = construct_var_name(0, atomizer.get_atom(_fact), '!');
+	int it = find(fact, found);
 	if (found)
-		unset(_locked, CTX, fact.c_str());
+		unset(_locked, CTX, fact);
 }
 
-void tframe_item::register_fact_group(bool _locked, context* CTX, string& fact, journal* J) {
+void tframe_item::register_fact_group(bool _locked, context* CTX, unsigned long long& fact, journal* J) {
 	bool locked = !_locked && mutex.try_lock();
 	bool found = false;
-	fact.insert(0, 1, '!');
-	int it = find(fact.c_str(), found);
+	string _fact = atomizer.get_string(get_name_code(fact));
+	_fact.insert(0, 1, '!');
+	fact = construct_var_name(0, atomizer.get_atom(_fact), '!');
+	int it = find(fact, found);
 	if (!found) {
-		set(locked, CTX, fact.c_str(), NULL);
-		it = find(fact.c_str(), found);
+		set(locked, CTX, fact, NULL);
+		it = find(fact, found);
 	}
 	if (!info_vars[it].first_writes || info_vars[it].first_writes > J->first_write) {
 		info_vars[it].first_writes = J->first_write;
@@ -673,64 +765,11 @@ void tframe_item::register_fact_group(bool _locked, context* CTX, string& fact, 
 	if (locked) unlock();
 }
 
-void tframe_item::unregister_fact_group(bool _locked, context* CTX, string& fact) {
+void tframe_item::unregister_fact_group(bool _locked, context* CTX, unsigned long long& fact) {
 	bool locked = !_locked && mutex.try_lock();
 	frame_item::unregister_fact_group(locked, CTX, fact);
 	if (locked) unlock();
 }
-
-class string_atomizer {
-	map<string, unsigned int> hash;
-	vector<const string *> table;
-	bool forking;
-	fastmux locker;
-public:
-	string_atomizer() { forking = false; }
-	void set_forking(bool v) { forking = v; }
-	unsigned int get_atom(const string & s) {
-		if (s.length() == 1)
-			return (unsigned char)s[0];
-		else if (s.length() == 2)
-			return (((unsigned char)s[1]) << 8) + (unsigned char)s[0];
-		else {
-			if (forking) locker.lock();
-			unsigned int result = 0;
-			map<string, unsigned int>::iterator it = hash.find(s);
-			if (it != hash.end())
-				result = it->second;
-			else {
-				if (table.size() == table.capacity()) {
-					table.reserve(table.size() + 2000);
-				}
-				pair<map<string, unsigned int>::iterator, bool> itt =
-					hash.insert(pair<string, unsigned int>(s, 0));
-				table.push_back(&itt.first->first);
-				itt.first->second = (unsigned int)(65536 + table.size() - 1);
-				result = itt.first->second;
-			}
-			if (forking) locker.unlock();
-			return result;
-		}
-	}
-	const string get_string(unsigned int atom) {
-		if (atom < 256) {
-			char buf[2] = { (char) atom, 0 };
-			return string(buf);
-		}
-		else if (atom < 65536) {
-			char buf[3] = { (char)(atom & 0xFF), (char)(atom >> 8), 0 };
-			return string(buf);
-		}
-		else {
-			if (forking) locker.lock();
-			string result = *table[atom - 65536];
-			if (forking) locker.unlock();
-			return result;
-		}
-	}
-};
-
-string_atomizer atomizer;
 
 class any : public value {
 public:
@@ -751,12 +790,22 @@ public:
 };
 
 class var : public value {
-	string name;
+	unsigned long long name;
 public:
-	var(const string & _name) : value(), name(_name) { }
+	var(unsigned int _name) : value() {
+		string content = atomizer.get_string(_name);
+		if (content.size())
+			name = construct_var_name(0, _name, content[0]);
+		else
+			name = construct_var_name(0, _name, (char)0);
+	}
+
+	var(unsigned long long _name, int) : value() {
+		name = _name;
+	}
 
 	virtual void escape_vars(context * CTX, frame_item * ff) {
-		value * v = ff->get(false, CTX, name.c_str());
+		value * v = ff->get(false, CTX, name);
 		if (v) {
 			v->escape_vars(CTX, ff);
 		}
@@ -764,7 +813,7 @@ public:
 	}
 
 	virtual value * fill(context * CTX, frame_item * vars) {
-		value * v = vars->get(false, CTX, name.c_str());
+		value * v = vars->get(false, CTX, name);
 		if (v)
 			return v->const_copy(CTX, vars);
 		else {
@@ -773,27 +822,31 @@ public:
 	}
 
 	virtual value * copy(context * CTX, frame_item * f, int unwind = 0) {
-		value * v = f->get(false, CTX, name.c_str(), unwind);
+		value * v = f->get(false, CTX, name, unwind);
 		if (v)
 			return v->const_copy(CTX, f);
 		else
-			return new var(name);
+			return new var(name, 0);
 	}
 
 	virtual void write(basic_ostream<char> * outs, bool simple = false) {
-		(*outs) << name;
+		(*outs) << atomizer.get_string(get_name_code(name));
 	}
 
-	virtual const string & get_name() { return name; }
+	virtual const string get_name() { return atomizer.get_string(get_name_code(name)); }
+
+	virtual const unsigned long long get_id() {
+		return name;
+	}
 
 	virtual bool unify(context * CTX, frame_item * ff, value * from) {
 		if (dynamic_cast<var *>(from) || dynamic_cast<any *>(from))
 			return true;
-		value * v = ff->get(false, CTX, name.c_str());
+		value * v = ff->get(false, CTX, name);
 		if (v)
 			return v->unify(CTX, ff, from);
 		else
-			ff->set(false, CTX, name.c_str(), from);
+			ff->set(false, CTX, name, from);
 		return true;
 	}
 	
@@ -801,7 +854,7 @@ public:
 		return false;
 	};
 
-	virtual string to_str(bool simple = false) { return "__VAR__" + name; }
+	virtual string to_str(bool simple = false) { return "__VAR__" + get_name(); }
 };
 
 class int_number : public value {
@@ -845,7 +898,7 @@ public:
 	virtual value * copy(context * CTX, frame_item * f, int unwind = 0) { return new float_number(v); }
 	virtual bool unify(context * CTX, frame_item * ff, value * from) {
 		if (dynamic_cast<any *>(from)) return true;
-		if (dynamic_cast<var *>(from)) { ff->set(false, CTX, ((var *)from)->get_name().c_str(), this); return true; }
+		if (dynamic_cast<var *>(from)) { ff->set(false, CTX, ((var *)from)->get_id(), this); return true; }
 		if (dynamic_cast<float_number *>(from))
 			return v == ((float_number *)from)->v;
 		else if (dynamic_cast<int_number *>(from))
@@ -872,7 +925,7 @@ public:
 
 bool int_number::unify(context * CTX, frame_item * ff, value * from) {
 	if (dynamic_cast<any *>(from)) return true;
-	if (dynamic_cast<var *>(from)) { ff->set(false, CTX, ((var *)from)->get_name().c_str(), this); return true; }
+	if (dynamic_cast<var *>(from)) { ff->set(false, CTX, ((var *)from)->get_id(), this); return true; }
 	if (dynamic_cast<int_number *>(from))
 		return v == ((int_number *)from)->v;
 	else if (dynamic_cast<float_number *>(from))
@@ -928,6 +981,10 @@ public:
 
 	virtual const string get_name() { return atomizer.get_string(name); }
 
+	virtual const unsigned int get_id() {
+		return name;
+	}
+
 	virtual const vector<value *> & get_args() { return args; }
 
 	virtual value * fill(context * CTX, frame_item * vars) {
@@ -958,7 +1015,7 @@ public:
 	virtual bool unify(context * CTX, frame_item * ff, value * from) {
 		cached_defined = -1;
 		if (dynamic_cast<any *>(from)) return true;
-		if (dynamic_cast<var *>(from)) { ff->set(false, CTX, ((var *)from)->get_name().c_str(), this); return true; }
+		if (dynamic_cast<var *>(from)) { ff->set(false, CTX, ((var *)from)->get_id(), this); return true; }
 		if (dynamic_cast<term *>(from)) {
 			term * v2 = ((term *)from);
 			if (name != v2->name || args.size() != v2->args.size())
@@ -1125,7 +1182,7 @@ public:
 	}
 	virtual bool unify(context * CTX, frame_item * ff, value * from) {
 		if (dynamic_cast<any *>(from)) return true;
-		if (dynamic_cast<var *>(from)) { ff->set(false, CTX, ((var *)from)->get_name().c_str(), this); return true; }
+		if (dynamic_cast<var *>(from)) { ff->set(false, CTX, ((var *)from)->get_id(), this); return true; }
 		if (dynamic_cast<indicator *>(from)) {
 			indicator * v2 = ((indicator *)from);
 			return name == v2->name && arity == v2->arity;
@@ -1581,7 +1638,7 @@ public:
 		cached_defined = -1;
 		if (dynamic_cast<any *>(from)) return true;
 		if (dynamic_cast<var *>(from)) {
-			ff->set(false, CTX, ((var *)from)->get_name().c_str(), this);
+			ff->set(false, CTX, ((var *)from)->get_id(), this);
 			return true;
 		}
 		if (dynamic_cast<list *>(from)) {
@@ -1799,7 +1856,7 @@ context::context(bool locals_in_forked, bool transactable_facts, predicate_item*
 			}
 			lock.unlock();
 		}
-		DBJournal = new map<string, std::atomic<journal*>>();
+		DBJournal = new map<unsigned long long, std::atomic<journal*>>();
 	}
 
 	rollback = false;
@@ -1841,8 +1898,8 @@ context* context::add_page(bool locals_in_forked, bool transactable_facts, predi
 	return result;
 }
 
-void context::register_db_read(const std::string& iid) {
-	map<string, std::atomic<journal*>>::iterator it = DBJournal->find(iid);
+void context::register_db_read(const unsigned long long iid) {
+	map<unsigned long long, std::atomic<journal*>>::iterator it = DBJournal->find(iid);
 	if (it == DBJournal->end()) {
 		(*DBJournal)[iid] = new journal();
 		it = DBJournal->find(iid);
@@ -1850,8 +1907,8 @@ void context::register_db_read(const std::string& iid) {
 	it->second.load()->register_read();
 }
 
-void context::register_db_write(const std::string& iid, jTypes t, value* data, int position, journal * src) {
-	map<string, std::atomic<journal*>>::iterator it = DBJournal->find(iid);
+void context::register_db_write(const unsigned long long iid, jTypes t, value* data, int position, journal * src) {
+	map<unsigned long long, std::atomic<journal*>>::iterator it = DBJournal->find(iid);
 	if (it == DBJournal->end()) {
 		(*DBJournal)[iid] = new journal();
 		it = DBJournal->find(iid);
@@ -1859,25 +1916,41 @@ void context::register_db_write(const std::string& iid, jTypes t, value* data, i
 	it->second.load()->register_write(t, data, position, src);
 }
 
-void context::apply_transactional_db_to_parent(const std::string & fact) {
-	map<string, std::atomic<journal*>>::iterator its = DBJournal->find(fact);
+void context::apply_transactional_db_to_parent(const std::string & _fact) {
+	unsigned long long fact = construct_var_name(0, atomizer.get_atom(_fact), _fact[0]);
+	map<unsigned long long, std::atomic<journal*>>::iterator its = DBJournal->find(fact);
 	if (its != DBJournal->end()) {
 		journal* SRC = its->second;
-		map<string, std::atomic<vector<term*>*>>::iterator it = parent->DB->find(fact);
+		map<string, std::atomic<vector<term*>*>>::iterator it = parent->DB->find(_fact);
 		if (it == parent->DB->end()) {
-			(*parent->DB)[fact] = new vector<term*>();
-			it = parent->DB->find(fact);
+			(*parent->DB)[_fact] = new vector<term*>();
+			it = parent->DB->find(_fact);
 		}
 		// Apply journal
 		for (journal_item* jlog : SRC->log) {
 			if (jlog->type == jInsert) {
+				size_t sz = it->second.load()->size();
+				if (jlog->position >= sz) {
+					jlog->position = (int)sz;
+					it->second.load()->push_back((term*)jlog->data);
+				}
+				else
+					it->second.load()->insert(it->second.load()->begin() + jlog->position, (term*)jlog->data);
 				parent->register_db_write(fact, jInsert, jlog->data, jlog->position, SRC);
-				it->second.load()->insert(it->second.load()->begin() + jlog->position, (term*)jlog->data);
 				jlog->data->use(); // to prevent free in ~journal_item()
 			}
 			else if (jlog->type == jDelete) {
+				if (jlog->position >= it->second.load()->size() || it->second.load()->at(jlog->position) != (term *)jlog->data) {
+					vector<term*>::iterator itv = find(it->second.load()->begin(), it->second.load()->end(), (term*)jlog->data);
+					if (itv != it->second.load()->end()) {
+						jlog->position = (int)(itv - it->second.load()->begin());
+						it->second.load()->erase(itv);
+					}
+					else
+						jlog->position = (int)(400000 + it->second.load()->size() + (jlog->position % 100000));
+				} else
+					it->second.load()->erase(it->second.load()->begin() + jlog->position);
 				parent->register_db_write(fact, jDelete, jlog->data, jlog->position, SRC);
-				it->second.load()->erase(it->second.load()->begin() + jlog->position);
 				jlog->data->use(); // to prevent free in ~journal_item()
 			}
 			else {
@@ -1911,8 +1984,8 @@ bool context::join(bool sequential_mode, int K, frame_item* f, interpreter* INTR
 	int success = 0;
 	bool stopped_by_true = false;
 	vector<bool> joineds(CONTEXTS.size(), false);
-	std::set<string> names;
-	vector<std::set<string>> lnames(CONTEXTS.size(), std::set<string>());
+	std::set<unsigned long long> names;
+	vector<std::set<unsigned long long>> lnames(CONTEXTS.size(), std::set<unsigned long long>());
 
 	f->add_local_names(false, lnames[CONTEXTS.size() - 1]);
 
@@ -1951,8 +2024,8 @@ bool context::join(bool sequential_mode, int K, frame_item* f, interpreter* INTR
 		stopped -= (int)std::count(rollback.begin(), rollback.end(), true);
 		// In not joineds search for winners
 		vector<vector<int>> M(CONTEXTS.size(), vector<int>(CONTEXTS.size(), 0));
-		std::set<string> conflictors;
-		for (const string& vname : names) {
+		std::set<unsigned long long> conflictors;
+		for (const unsigned long long vname : names) {
 			// Conflict Matrix
 			for (int i = 0; i < CONTEXTS.size()-2; i++)
 				for (int j = i + 1; j < CONTEXTS.size()-1; j++)
@@ -2004,9 +2077,45 @@ bool context::join(bool sequential_mode, int K, frame_item* f, interpreter* INTR
 		} while (changed);
 		// Decide
 		int first_winner = mainlined ? (int)(CONTEXTS.size() - 1) : -1;
-		std::set<int> other_winners;
+		std::map<double, int> other_winners; // key = fw+0.1*id, val = number of thread
 		int first = first_winner < 0 ? 0 : first_winner;
 		int last = first_winner < 0 ? (int)(CONTEXTS.size() - 1) : first_winner;
+
+		std::map<int, double> keys;
+
+		auto get_key = [&](int i)->double {
+			if (stoppeds[i] && CONTEXTS[i]->FRAME.load()) {
+				clock_rdtsc min_time = 0;
+				if (conflictors.size())
+					for (const unsigned long long vname : conflictors /* names */) {
+						if (lnames[i].find(vname) != lnames[i].end()) {
+							clock_rdtsc cr, fw, fr, lw, lr;
+							CONTEXTS[i]->FRAME.load()->statistics(vname, cr, fw, fr, lw, lr);
+							if (fw && (!min_time || fw < min_time && fw >= cr)) {
+								min_time = fw;
+							}
+						}
+					}
+				else
+					for (const unsigned long long vname : names) {
+						if (lnames[i].find(vname) != lnames[i].end()) {
+							clock_rdtsc cr, fw, fr, lw, lr;
+							CONTEXTS[i]->FRAME.load()->statistics(vname, cr, fw, fr, lw, lr);
+							if (fw && (!min_time || fw < min_time && fw >= cr)) {
+								min_time = fw;
+							}
+						}
+					}
+				return min_time + 0.1 * i;
+			}
+			else
+				return i * 1E50;
+		};
+
+		for (int j = 0; j < CONTEXTS.size(); j++) {
+			keys.insert({ j, get_key(j) });
+		}
+
 		for (int i = first; i <= last; i++)
 			if (stoppeds[i]) {
 				std::set<int> conflicted;
@@ -2017,47 +2126,36 @@ bool context::join(bool sequential_mode, int K, frame_item* f, interpreter* INTR
 				for (int k = i + 1; k < CONTEXTS.size(); k++)
 					if (M[i][k])
 						conflicted.insert(k);
-				std::set<int> parallels;
+				std::map<double, int> parallels;
 				for (int j = 0; j < CONTEXTS.size(); j++) {
 					if (i != j && stoppeds[j] && conflicted.find(j) == conflicted.end())
-						parallels.insert(j);
+						parallels.insert({ keys[j], j });
 				}
 				int candidate = i;
 				if (parallels.size() > 1) {
-					clock_rdtsc min_time = 0;
-					if (!mainlined) parallels.insert(i);
-					for (const string& vname : names) {
-						for (int j : parallels) {
-							if (stoppeds[j] && lnames[j].find(vname) != lnames[j].end()) {
-								clock_rdtsc cr, fw, fr, lw, lr;
-								CONTEXTS[j]->FRAME.load()->statistics(vname, cr, fw, fr, lw, lr);
-								if (fw && (!min_time || fw < min_time && fw >= cr)) {
-									candidate = j;
-									min_time = fw;
-								}
-							}
-						}
-					}
-					if (!mainlined) parallels.erase(i);
+					double key = keys[i];
+					if (!mainlined) parallels.insert({ key, i });
+					candidate = parallels.begin()->second;
+					if (!mainlined) parallels.erase(key);
 					for (int j = 0; j < CONTEXTS.size(); j++)
 						for (int k = j + 1; k < CONTEXTS.size(); k++)
 							if (M[j][k]) {
-								parallels.erase(j);
-								parallels.erase(k);
+								parallels.erase(keys[j]);
+								parallels.erase(keys[k]);
 							}
 				}
 				if (mainlined) {
-					parallels.insert(candidate);
-					parallels.erase(i);
-					parallels.insert(-i);
+					parallels.insert({ keys[candidate], candidate });
+					parallels.erase(keys[i]);
+					parallels.insert({ -keys[i], i });
 					candidate = i;
 				}
 				else {
-					parallels.insert(i);
-					parallels.erase(candidate);
-					parallels.insert(-candidate);
+					parallels.insert({ keys[i], i });
+					parallels.erase(keys[candidate]);
+					parallels.insert({ -keys[candidate], candidate });
 				}
-				if ((sequential < 0 || candidate == sequential || parallels.find(sequential) != parallels.end() || parallels.find(-sequential) != parallels.end()) &&
+				if ((sequential < 0 || candidate == sequential || parallels.find(keys[sequential]) != parallels.end() || parallels.find(-keys[sequential]) != parallels.end()) &&
 					parallels.size() > other_winners.size()) {
 					other_winners = parallels;
 					first_winner = candidate;
@@ -2067,62 +2165,57 @@ bool context::join(bool sequential_mode, int K, frame_item* f, interpreter* INTR
 			if (sequential >= 0)
 				first_winner = sequential;
 			else {
-				clock_rdtsc min_time = 0;
-				for (const string& vname : conflictors) {
-					for (int i = 0; i < CONTEXTS.size(); i++)
-						if (stoppeds[i] && lnames[i].find(vname) != lnames[i].end()) {
-							clock_rdtsc cr, fw, fr, lw, lr;
-							CONTEXTS[i]->FRAME.load()->statistics(vname, cr, fw, fr, lw, lr);
-							if (fw && (!min_time || fw < min_time && fw >= cr)) {
-								first_winner = i;
-								min_time = fw;
-							}
-						}
-				}
-				for (int i = 0; first_winner < 0 && i < CONTEXTS.size(); i++)
-					if (stoppeds[i])
-						first_winner = i;
+				double min_val = 1E70;
+				for (auto & p : keys)
+					if (p.second < min_val) {
+						min_val = p.second;
+						first_winner = p.first;
+					}
 			}
 			if (first_winner >= 0) {
-				other_winners.erase(first_winner);
-				other_winners.insert(-first_winner);
+				double key = keys[first_winner];
+				other_winners.erase(key);
+				other_winners.insert({ -key, first_winner });
 			}
 		}
 		f->unregister_facts(false, this);
 		if (mainlined)
 		{
-			other_winners.erase(first_winner);
-			other_winners.erase(-first_winner);
+			double key = keys[first_winner];
+			other_winners.erase(key);
+			other_winners.erase(-key);
 			joineds[CONTEXTS.size() - 1] = true;
 			stoppeds[CONTEXTS.size() - 1] = false;
 			success++;
 			joined++;
 		}
-		if (sequential >= 0 && (other_winners.size() == 0 || abs(*other_winners.begin()) != sequential)) {
+		if (sequential >= 0 && (other_winners.size() == 0 || other_winners.begin()->second != sequential)) {
 			other_winners.clear();
 			if (!rollback[sequential])
-				other_winners.insert(sequential);
+				other_winners.insert({ keys[sequential], sequential });
 		}
 		// Set vars by threads with non-zero first_writes
 		stopped_by_true = false;
-		for (int _winner : other_winners) {
-			int winner = abs(_winner);
+		for (auto & _winner : other_winners) {
+			int winner = _winner.second;
 			if (sequential >= 0 && (rollback[winner] || winner != sequential)) {
 				for (int rollb = sequential; rollb < CONTEXTS.size()-1; rollb++) {
 					stoppeds[rollb] = false;
 					rollback[rollb] = true;
-					other_winners.erase(rollb);
-					other_winners.erase(-rollb);
+					double key = keys[rollb];
+					other_winners.erase(key);
+					other_winners.erase(-key);
 					stopped--;
 				}
 				break;
 			}
-			for (const string& vname : names)
+			for (const unsigned long long vname : names)
 				if (lnames[winner].find(vname) != lnames[winner].end() && CONTEXTS[winner]->FRAME.load()->first_write(vname))
 				{
-					if (vname[0] == '!') {
+					if (get_first_char(vname) == '!') {
 						if (DB != CONTEXTS[winner]->DB) {
-							string fact = vname.substr(1);
+							string _vname = atomizer.get_string(get_name_code(vname));
+							string fact = _vname.substr(1);
 							std::unique_lock<fastmux> dblock(*DBLOCK);
 							std::unique_lock<fastmux> wdblock(*CONTEXTS[winner]->DBLOCK);
 							CONTEXTS[winner]->apply_transactional_db_to_parent(fact);
@@ -2130,18 +2223,18 @@ bool context::join(bool sequential_mode, int K, frame_item* f, interpreter* INTR
 							dblock.unlock();
 						}
 					}
-					else if (vname[0] == '*' || CONTEXTS[winner]->THR->get_result())
+					else if (get_first_char(vname) == '*' || CONTEXTS[winner]->THR->get_result())
 					{
 						f->lock();
-						value* old = f->get(true, this, vname.c_str());
-						value* cur = CONTEXTS[winner]->FRAME.load()->get(false, CONTEXTS[winner], vname.c_str());
+						value* old = f->get(true, this, vname);
+						value* cur = CONTEXTS[winner]->FRAME.load()->get(false, CONTEXTS[winner], vname);
 						if (cur)
-							if (old && (vname.length() == 0 || vname[0] != '*')) {
+							if (old && get_first_char(vname) != '*') {
 								if (!old->unify(this, f, cur))
 									CONTEXTS[winner]->THR->set_result(false);
 							}
 							else
-								f->set(true, this, vname.c_str(), cur);
+								f->set(true, this, vname, cur);
 						f->unlock();
 					}
 				}
@@ -2151,8 +2244,9 @@ bool context::join(bool sequential_mode, int K, frame_item* f, interpreter* INTR
 					for (int rollb = sequential; rollb < CONTEXTS.size()-1; rollb++) {
 						stoppeds[rollb] = false;
 						rollback[rollb] = true;
-						other_winners.erase(rollb);
-						other_winners.erase(-rollb);
+						double key = keys[rollb];
+						other_winners.erase(key);
+						other_winners.erase(-key);
 						stopped--;
 					}
 					stopped_by_true = true;
@@ -2161,14 +2255,36 @@ bool context::join(bool sequential_mode, int K, frame_item* f, interpreter* INTR
 			}
 		}
 		// Join first_winner && other_winners
+		for (auto & _i : other_winners) {
+			int i = _i.second;
+			if (stoppeds[i]) {
+				CONTEXTS[i]->THR->set_context(NULL);
+				CONTEXTS[i]->THR->set_terminated(true);
+				{
+					std::lock_guard<fastmux> lk(CONTEXTS[i]->THR->get_stopped_mutex());
+					CONTEXTS[i]->THR->set_stopped(false);
+					CONTEXTS[i]->THR->get_stopped_var().notify_one();
+				}
+				{
+					std::unique_lock<fastmux> lk(CONTEXTS[i]->THR->get_terminated_mutex());
+					while (CONTEXTS[i]->THR->is_terminated())
+						CONTEXTS[i]->THR->get_terminated_var().wait(lk);
+				}
+				joineds[i] = true;
+				if (CONTEXTS[i]->THR->get_result())
+					success++;
+				joined++;
+			}
+		}
 		for (int i = 0; i < CONTEXTS.size(); i++)
 			if (stoppeds[i] || rollback[i]) {
-				if (rollback[i] || other_winners.find(i) == other_winners.end() && other_winners.find(-i) == other_winners.end()) {
+				double key = keys[i];
+				if (rollback[i] || other_winners.find(key) == other_winners.end() && other_winners.find(-key) == other_winners.end()) {
 					if (CONTEXTS[i]->transactable_facts) { // Undo facts
 						std::unique_lock<fastmux> lock(*DBLOCK);
 						std::unique_lock<fastmux> ilock(*CONTEXTS[i]->DBLOCK);
 						// Delete journal, including deleted nodes
-						map<string, std::atomic<journal*>>::iterator itj = CONTEXTS[i]->DBJournal->begin();
+						map<unsigned long long, std::atomic<journal*>>::iterator itj = CONTEXTS[i]->DBJournal->begin();
 						while (itj != CONTEXTS[i]->DBJournal->end()) {
 							delete itj->second;
 							itj++;
@@ -2224,9 +2340,9 @@ bool context::join(bool sequential_mode, int K, frame_item* f, interpreter* INTR
 					else {
 						FRAMES_TO_DELETE.push(CONTEXTS[i]->FRAME.load());
 						// if (sequential >= 0) {
-							tframe_item* newf = CONTEXTS[i]->INIT.load()->tcopy(this, INTRP);
-							newf->forced_import_transacted_globs(this, f);
-							CONTEXTS[i]->FRAME.store(newf);
+						tframe_item* newf = CONTEXTS[i]->INIT.load()->tcopy(this, INTRP);
+						newf->forced_import_transacted_globs(this, f);
+						CONTEXTS[i]->FRAME.store(newf);
 						// }
 						// else
 						//	CONTEXTS[i]->FRAME.store(f->tcopy(this, INTRP, false));
@@ -2237,24 +2353,6 @@ bool context::join(bool sequential_mode, int K, frame_item* f, interpreter* INTR
 							CONTEXTS[i]->THR->get_stopped_var().notify_one();
 						}
 					}
-				}
-				else {
-					CONTEXTS[i]->THR->set_context(NULL);
-					CONTEXTS[i]->THR->set_terminated(true);
-					{
-						std::lock_guard<fastmux> lk(CONTEXTS[i]->THR->get_stopped_mutex());
-						CONTEXTS[i]->THR->set_stopped(false);
-						CONTEXTS[i]->THR->get_stopped_var().notify_one();
-					}
-					{
-						std::unique_lock<fastmux> lk(CONTEXTS[i]->THR->get_terminated_mutex());
-						while (CONTEXTS[i]->THR->is_terminated())
-							CONTEXTS[i]->THR->get_terminated_var().wait(lk);
-					}
-					joineds[i] = true;
-					if (CONTEXTS[i]->THR->get_result())
-						success++;
-					joined++;
 				}
 			}
 	} while (joined < CONTEXTS.size());
@@ -2269,14 +2367,15 @@ bool context::join(bool sequential_mode, int K, frame_item* f, interpreter* INTR
 
 	prolog->GLOCK.lock();
 	f->lock();
-	for (const string& vname : names)
-		if (vname[0] != '!')
+	for (const unsigned long long vname : names)
+		if (get_first_char(vname) != '!')
 		{
-			value* v = f->get(true, this, vname.c_str());
+			value* v = f->get(true, this, vname);
 			for (int i = 0; i < CONTEXTS.size(); i++)
-				CONTEXTS[i]->FRAME.load()->set(false, CONTEXTS[i], vname.c_str(), NULL);
-			if (!forked && v && vname.length() && vname[0] == '*') {
-				string src_name = vname.substr(1);
+				CONTEXTS[i]->FRAME.load()->set(false, CONTEXTS[i], vname, NULL);
+			if (!forked && v && get_first_char(vname) == '*') {
+				string _vname = atomizer.get_string(get_name_code(vname));
+				string src_name = _vname.substr(1);
 				std::map<std::string, value*>::iterator it = prolog->GVars.find(src_name);
 				if (it != prolog->GVars.end()) {
 					it->second->free();
@@ -2322,7 +2421,7 @@ bool context::join(bool sequential_mode, int K, frame_item* f, interpreter* INTR
 }
 
 void context::clearDBJournals() {
-	map<string, std::atomic<journal*>>::iterator itj = DBJournal->begin();
+	map<unsigned long long, std::atomic<journal*>>::iterator itj = DBJournal->begin();
 	while (itj != DBJournal->end()) {
 		delete itj->second;
 		itj++;
@@ -2345,7 +2444,7 @@ context::~context() {
 		delete DBLOCK;
 		delete DB;
 
-		map<string, std::atomic<journal*>>::iterator itj = DBJournal->begin();
+		map<unsigned long long, std::atomic<journal*>>::iterator itj = DBJournal->begin();
 		while (itj != DBJournal->end()) {
 			delete itj->second;
 			itj++;
@@ -2397,7 +2496,7 @@ generated_vars * predicate_item_user::generate_variants(context * CTX, frame_ite
 		string iid = id;
 		term * dummy = NULL;
 		if (id.length() > 0 && id[0] >= 'A' && id[0] <= 'Z') {
-			dummy = dynamic_cast<term *>(f->get(false, CTX, id.c_str()));
+			dummy = dynamic_cast<term *>(f->get(false, CTX, construct_var_name(0, atomizer.get_atom(id), id[0])));
 			if (dummy) {
 				dummy = dynamic_cast<term *>(dummy->const_copy(CTX, f, 1));
 				iid = dummy->get_name();
@@ -2412,7 +2511,7 @@ generated_vars * predicate_item_user::generate_variants(context * CTX, frame_ite
 		std::unique_lock<fastmux> lock(*CTX->DBLOCK);
 		map<string, std::atomic<vector<term*>*>>::iterator it = CTX->DB->find(iid);
 		if (dummy && it != CTX->DB->end()) {
-			CTX->register_db_read(iid);
+			CTX->register_db_read(construct_var_name(0, dummy->get_id(), iid[0]));
 			vector<term *> * terms = it->second;
 			for (int i = 0; i < terms->size(); i++) {
 				frame_item * ff = f->copy(CTX);
@@ -2901,10 +3000,10 @@ public:
 			}
 		}
 		else if (a1 && !a2) {
-			r->set(false, CTX, a1->get_name().c_str(), positional_vals->at(1));
+			r->set(false, CTX, a1->get_id(), positional_vals->at(1));
 		}
 		else if (!a1 && a2) {
-			r->set(false, CTX, a2->get_name().c_str(), positional_vals->at(0));
+			r->set(false, CTX, a2->get_id(), positional_vals->at(0));
 		}
 		return result;
 	}
@@ -3064,14 +3163,14 @@ public:
 			int_number * n2 = dynamic_cast<int_number *>(positional_vals->at(1));
 			int_number * _n2 = new int_number((int)(n2->get_value()) - 1);
 
-			r->set(false, CTX, a1->get_name().c_str(), _n2);
+			r->set(false, CTX, a1->get_id(), _n2);
 			_n2->free();
 		}
 		else if (!a1 && a2) {
 			int_number * n1 = dynamic_cast<int_number *>(positional_vals->at(0));
 			int_number* _n1 = new int_number((int)n1->get_value() + 1);
 
-			r->set(false, CTX, a2->get_name().c_str(), _n1);
+			r->set(false, CTX, a2->get_id(), _n1);
 			_n1->free();
 		}
 		return result;
@@ -3382,7 +3481,7 @@ public:
 			std::unique_lock<fastmux> lock(*CTX->DBLOCK);
 			map< string, std::atomic<vector<term *> *>>::iterator itd = CTX->DB->find(itf->second->to_str());
 			if (itd != CTX->DB->end()) {
-				CTX->register_db_read(itd->first);
+				CTX->register_db_read(construct_var_name(0, atomizer.get_atom(itd->first), itd->first[0]));
 				n_objs = (int)itd->second.load()->size();
 			}
 			lock.unlock();
@@ -3465,13 +3564,13 @@ public:
 		auto assertz = [&](term * t) {
 			string atid = t->get_name();
 			std::unique_lock<fastmux> lock(*CTX->DBLOCK);
-			CTX->register_db_read(atid);
+			CTX->register_db_read(construct_var_name(0, t->get_id(), atid[0]));
 			if (CTX->DB->find(atid) == CTX->DB->end())
 				(*CTX->DB)[atid] = new vector<term*>();
 
 			vector<term *> * terms = (*CTX->DB)[atid];
 			term* tt = (term*)t->const_copy(CTX, f);
-			CTX->register_db_write(atid, jInsert, tt, (int)terms->size());
+			CTX->register_db_write(construct_var_name(0, t->get_id(), atid[0]), jInsert, tt, (int)terms->size());
 			terms->push_back(tt);
 			lock.unlock();
 
@@ -3493,12 +3592,14 @@ public:
 			bool result = true;
 			TSystem * S = new TSystem();
 			try {
-				string ObjFactID = dynamic_cast<term *>(_ObjFactID)->get_name();
-				string LinkFactID = dynamic_cast<term *>(_LinkFactID)->get_name();
+				string sObjFactID = dynamic_cast<term*>(_ObjFactID)->get_name();
+				unsigned long long ObjFactID = construct_var_name(0, dynamic_cast<term *>(_ObjFactID)->get_id(), sObjFactID[0]);
+				string sLinkFactID = dynamic_cast<term *>(_LinkFactID)->get_name();
+				unsigned long long LinkFactID = construct_var_name(0, dynamic_cast<term*>(_LinkFactID)->get_id(), sLinkFactID[0]);
 				wstring Lang;
 				S->LoadFromXML(Lang, utf8_to_wstring(FName));
 				std::unique_lock<fastmux> lock(*CTX->DBLOCK);
-				map<string, std::atomic<vector<term *>*>>::iterator it = CTX->DB->find(ObjFactID);
+				map<string, std::atomic<vector<term *>*>>::iterator it = CTX->DB->find(sObjFactID);
 				if (it != CTX->DB->end()) {
 					CTX->register_db_read(ObjFactID);
 					for (term * t : *it->second)
@@ -3508,7 +3609,7 @@ public:
 				lock.unlock();
 				S->EnumerateObjs(
 					[&](TElement * E) {
-						term * t = new term(ObjFactID);
+						term * t = new term(sObjFactID);
 						t->add_arg(CTX, f, new term(wstring_to_utf8(E->Ident)));
 						t->add_arg(CTX, f, new term(wstring_to_utf8(E->Ref->ClsID)));
 						::list * L = new ::list(stack_container<value *>(), NULL);
@@ -3527,7 +3628,7 @@ public:
 					}
 				);
 				lock.lock();
-				it = CTX->DB->find(LinkFactID);
+				it = CTX->DB->find(sLinkFactID);
 				if (it != CTX->DB->end()) {
 					CTX->register_db_read(LinkFactID);
 					for (term * t : *it->second)
@@ -3537,7 +3638,7 @@ public:
 				lock.unlock();
 				S->EnumerateLinks(
 					[&](TLink * L) {
-						term * t = new term(LinkFactID);
+						term * t = new term(sLinkFactID);
 						t->add_arg(CTX, f, new term(wstring_to_utf8(L->_From->Owner->Ident)));
 						t->add_arg(CTX, f, new term(wstring_to_utf8(L->_From->Ref->CntID)));
 						t->add_arg(CTX, f, new term(wstring_to_utf8(L->_To->Owner->Ident)));
@@ -3747,7 +3848,7 @@ public:
 		string new_name = a1->get_name();
 		if (CTX->forked() && (new_name.length() == 0 || new_name[0] != '&')) {
 			new_name.insert(0, 1, '*');
-			r->set(false, CTX, new_name.c_str(), a2->const_copy(CTX, r));
+			r->set(false, CTX, construct_var_name(0, atomizer.get_atom(new_name), '*'), a2->const_copy(CTX, r));
 		}
 		else {
 			std::unique_lock<fastmux> glock(prolog->GLOCK);
@@ -3787,7 +3888,7 @@ public:
 		string new_name = a1->get_name();
 		if (CTX->forked() && (new_name.length() == 0 || new_name[0] != '&')) {
 			new_name.insert(0, 1, '*');
-			::list* L = dynamic_cast<::list*>(r->get(false, CTX, new_name.c_str()));
+			::list* L = dynamic_cast<::list*>(r->get(false, CTX, construct_var_name(0, atomizer.get_atom(new_name), '*')));
 			if (L && L->set_nth((int)a2->get_value(), a3->const_copy(CTX, r))) {
 				r->register_write(new_name);
 				result->push_back(r);
@@ -3840,7 +3941,7 @@ public:
 		string new_name = a1->get_name();
 		if (CTX->forked() && (new_name.length() == 0 || new_name[0] != '&')) {
 			new_name.insert(0, 1, '*');
-			value* v = r->get(false, CTX, new_name.c_str());
+			value* v = r->get(false, CTX, construct_var_name(0, atomizer.get_atom(new_name), '*'));
 			if (v) {
 				if (!a2->unify(CTX, r, v)) {
 					delete result;
@@ -5714,7 +5815,7 @@ public:
 		map< string, std::atomic<vector<term *> *>>::iterator it = CTX->DB->begin();
 		while (it != CTX->DB->end()) {
 			if (!t || it->first == t->get_name()) {
-				CTX->register_db_read(it->first);
+				CTX->register_db_read(construct_var_name(0, atomizer.get_atom(it->first), it->first[0]));
 				for (int i = 0; i < it->second.load()->size(); i++)
 					if (!t || it->second.load()->at(i)->get_args().size() == t->get_arity()) {
 						if (prolog->out_buf.size() == 0) {
@@ -5761,7 +5862,7 @@ public:
 			map< string, std::atomic<vector<term *> *>>::iterator it = CTX->DB->begin();
 			while (it != CTX->DB->end()) {
 				if (it->first == t->get_name()) {
-					CTX->register_db_read(it->first);
+					CTX->register_db_read(construct_var_name(0, atomizer.get_atom(it->first), it->first[0]));
 					for (int i = 0; i < it->second.load()->size(); i++)
 						if (it->second.load()->at(i)->get_args().size() == t->get_arity()) {
 							frame_item* r = f->copy(CTX);
@@ -5784,7 +5885,7 @@ public:
 		value * t = dynamic_cast<value *>(positional_vals->at(0));
 		while (it != CTX->DB->end()) {
 			set<int> seen;
-			CTX->register_db_read(it->first);
+			CTX->register_db_read(construct_var_name(0, atomizer.get_atom(it->first), it->first[0]));
 			for (int i = 0; i < it->second.load()->size(); i++) {
 				int n = (int)it->second.load()->at(i)->get_args().size();
 				if (seen.find(n) == seen.end()) {
@@ -5840,7 +5941,7 @@ public:
 		generated_vars * result = new generated_vars();
 
 		if (v) {
-			t = dynamic_cast<term *>(f->get(false, CTX, v->get_name().c_str()));
+			t = dynamic_cast<term *>(f->get(false, CTX, v->get_id()));
 			if (t) {
 				t = dynamic_cast<term *>(t->const_copy(CTX, f, 1));
 			} else {
@@ -5849,8 +5950,9 @@ public:
 			}
 		}
 		std::unique_lock<fastmux> lock(*CTX->DBLOCK);
-		if (t && CTX->DB->find(t->get_name()) != CTX->DB->end()) {
-			CTX->register_db_read(t->get_name());
+		string tid = t->get_name();
+		if (t && CTX->DB->find(tid) != CTX->DB->end()) {
+			CTX->register_db_read(construct_var_name(0, t->get_id(), tid[0]));
 			vector<term *> * terms = (*CTX->DB)[t->get_name()];
 			stack_container<value *> L;
 			for (int i = 0; i < terms->size(); i++) {
@@ -6286,8 +6388,9 @@ public:
 		term* t = dynamic_cast<term*>(positional_vals->at(0));
 		if (t && t->get_args().size() == 0) {
 			frame_item* r = f->copy(CTX);
+			string tid = t->get_name();
 
-			r->unset(false, CTX, t->get_name().c_str());
+			r->unset(false, CTX, construct_var_name(0, t->get_id(), tid[0]));
 
 			generated_vars* result = new generated_vars();
 
@@ -7337,11 +7440,11 @@ public:
 		vector<term *> * terms = it->second;
 		term* tt = (term*)t->const_copy(CTX, f);
 		if (z) {
-			CTX->register_db_write(atid, jInsert, tt, (int)terms->size());
+			CTX->register_db_write(construct_var_name(0, t->get_id(), atid[0]), jInsert, tt, (int)terms->size());
 			terms->push_back(tt);
 		}
 		else {
-			CTX->register_db_write(atid, jInsert, tt, 0);
+			CTX->register_db_write(construct_var_name(0, t->get_id(), atid[0]), jInsert, tt, 0);
 			terms->insert(terms->begin(), tt);
 		}
 
@@ -7367,9 +7470,13 @@ public:
 
 class predicate_item_retract : public predicate_item {
 	bool all;
+	unsigned long long RETRACTOR, FUNCTOR;
 public:
 	predicate_item_retract(bool _all, bool _neg, bool _once, bool _call, int num, clause* c, interpreter* _prolog) :
-		predicate_item(_neg, _once, _call, num, c, _prolog), all(_all) { }
+		predicate_item(_neg, _once, _call, num, c, _prolog), all(_all) {
+		RETRACTOR = construct_var_name(0, atomizer.get_atom("$RETRACTOR$"), '$');
+		FUNCTOR = construct_var_name(0, atomizer.get_atom("$FUNCTOR$"), '$');
+	}
 
 	virtual const string get_id() { return all ? "retractall" : "retract"; }
 
@@ -7387,12 +7494,13 @@ public:
 		}
 
 		std::unique_lock<fastmux> lock(*CTX->DBLOCK);
-		map<string, std::atomic<vector<term*>*>>::iterator itdb = CTX->DB->find(t->get_name());
+		string tid = t->get_name();
+		map<string, std::atomic<vector<term*>*>>::iterator itdb = CTX->DB->find(tid);
 		if (itdb == CTX->DB->end()) {
-			(*CTX->DB)[t->get_name()] = new vector<term*>();
+			(*CTX->DB)[tid] = new vector<term*>();
 			itdb = CTX->DB->find(t->get_name());
 		}
-		CTX->register_db_read(itdb->first);
+		CTX->register_db_read(construct_var_name(0, t->get_id(), tid[0]));
 
 		vector<term*>* terms = itdb->second.load();
 		vector<term*>::iterator it = terms->begin();
@@ -7400,17 +7508,17 @@ public:
 			term* tt = (term*)t->const_copy(CTX, f);
 			if (tt->unify(CTX, f, *it)) {
 				if (all) {
-					CTX->register_db_write(itdb->first, jDelete, *it, (int)(it - terms->begin()));
+					CTX->register_db_write(construct_var_name(0, t->get_id(), tid[0]), jDelete, *it, (int)(it - terms->begin()));
 					it = terms->erase(it);
 				}
 				else {
 					frame_item* ff = f->copy(CTX);
 					value* v1 = new int_number((long long)(*it));
 					ff->lock();
-					ff->set(true, CTX, "$RETRACTOR$", v1);
+					ff->set(true, CTX, RETRACTOR, v1);
 					v1->free();
 					value* v3 = new term(itdb->first);
-					ff->set(true, CTX, "$FUNCTOR$", v3);
+					ff->set(true, CTX, FUNCTOR, v3);
 					ff->unlock();
 					v3->free();
 					result->push_back(ff);
@@ -7441,22 +7549,24 @@ public:
 
 		std::unique_lock<fastmux> lock(*CTX->DBLOCK);
 		f->lock();
-		string iid = ((term*)f->get(true, CTX, "$FUNCTOR$"))->get_name();
-		f->get(true, CTX, "$FUNCTOR$")->free();
-		f->unset(true, CTX, "$FUNCTOR$");
+		term* tid = (term*)f->get(true, CTX, FUNCTOR);
+		string iid = tid->get_name();
+		unsigned long long _tid = tid->get_id();
+		f->get(true, CTX, FUNCTOR)->free();
+		f->unset(true, CTX, FUNCTOR);
 
 		map<string, std::atomic<vector<term*>*>>::iterator itdb = CTX->DB->find(iid);
 
-		CTX->register_db_read(iid);
+		CTX->register_db_read(construct_var_name(0, _tid, iid[0]));
 
-		term* v = (term*)((long long)(0.5 + ((int_number*)f->get(true, CTX, "$RETRACTOR$"))->get_value()));
-		f->get(true, CTX, "$RETRACTOR$")->free();
-		f->unset(true, CTX, "$RETRACTOR$");
+		term* v = (term*)((long long)(0.5 + ((int_number*)f->get(true, CTX, RETRACTOR))->get_value()));
+		f->get(true, CTX, RETRACTOR)->free();
+		f->unset(true, CTX, RETRACTOR);
 		f->unlock();
 		if (v && itdb->second.load()) {
 			vector<term*>::iterator it = find(itdb->second.load()->begin(), itdb->second.load()->end(), v);
 			if (it != itdb->second.load()->end()) {
-				CTX->register_db_write(iid, jDelete, *it, (int)(it - itdb->second.load()->begin()));
+				CTX->register_db_write(construct_var_name(0, _tid, iid[0]), jDelete, *it, (int)(it - itdb->second.load()->begin()));
 				itdb->second.load()->erase(it);
 			}
 			lock.unlock();
@@ -7533,7 +7643,7 @@ public:
 
 		var* nv = dynamic_cast<var*>(n_threads);
 		if (nv) {
-			value* v = f->get(false, CTX, nv->get_name().c_str());
+			value* v = f->get(false, CTX, nv->get_id());
 
 			if (!v || !v->defined()) {
 				std::cout << "Number of threads [" << nv->get_name() << "] is not defined!" << endl;
@@ -7614,7 +7724,7 @@ public:
 
 			var* nv = dynamic_cast<var*>(k);
 			if (nv) {
-				value* v = f->get(false, CTX, nv->get_name().c_str());
+				value* v = f->get(false, CTX, nv->get_id());
 
 				if (!v || !v->defined()) {
 					std::cout << "Number of &-joined threads [" << nv->get_name() << "] is not defined!" << endl;
@@ -7910,12 +8020,13 @@ value * interpreter::parse(context * CTX, bool exit_on_error, bool parse_complex
 				(s[p] >= 'A' && s[p] <= 'Z' || s[p] >= 'a' && s[p] <= 'z' || s[p] >= '0' && s[p] <= '9' ||
 				 s[p] == '_'))
 				st += s[p++];
+			unsigned int atom = atomizer.get_atom(st);
 			bool found = false;
-			int it = ff->find(st.c_str(), found);
+			int it = ff->find(construct_var_name(0, atom, st[0]), found);
 			if (found)
 				result = ff->at(it)->const_copy(CTX, ff);
 			else
-				result = new var(st);
+				result = new var(atom);
 		}
 		else if (s[p] == '_') {
 			p++;
@@ -9862,7 +9973,7 @@ int main(int argc, char ** argv) {
 		main_part++;
 	}
 
-	std::cout << "Prolog MicroBrain by V.V.Pekunov V0.23beta4" << endl;
+	std::cout << "Prolog MicroBrain by V.V.Pekunov V0.23beta5 (Ghiros)" << endl;
 	if (argc == main_part) {
 		interpreter prolog("", "");
 		std::cout << "  Enter 'halt.' or 'end_of_file' to exit." << endl << endl;

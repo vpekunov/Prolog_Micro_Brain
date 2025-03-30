@@ -45,7 +45,7 @@
 	run7 :- {{for(A, 1, 1000000), fail},{for(B, 1, 1000000), fail},{=0}}{{for(A, 1, 1000000), fail},{for(B, 1, 1000000), fail},{=0}},
 		{&}.
 
-	run8 :- {(for(M,1,1000),fail;true),g_assign('m',5),write('1='),g_read('m',A),write(A)}{g_assign('m',6),write('2='),g_read('m',B),write(B)},
+	run8 :- {(for(M,1,1000000),fail;true),g_assign('m',5),write('1='),g_read('m',A),write(A)}{g_assign('m',6),write('2='),g_read('m',B),write(B)},
 		{&},
 		g_read('m',X),
 		write(X).
@@ -71,7 +71,7 @@
 
 	run17 :- g_assign('&A',0), *{g_read('&A',A), write(A), B is A+1, g_assign('&A',B), =(B,5); rollback}, {&}.
 
-	run18 :- retractall(a(_)), !{(for(M,1,1000),fail;true),asserta(a(1)),write(1)},!{retractall(a(_)),asserta(a(2)),write(2),asserta(s(1))},{&},
+	run18 :- retractall(a(_)), !{(for(M,1,1000000),fail;true),asserta(a(1)),write(1)},!{retractall(a(_)),asserta(a(2)),write(2),asserta(s(1))},{&},
 		 nl,
 		 a(A),
 		 write(A),
