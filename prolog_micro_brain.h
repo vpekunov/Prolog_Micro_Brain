@@ -920,7 +920,7 @@ class tframe_item : public frame_item {
 	} var_info;
 
 	int info_capacity;
-	var_info micro_info[nn];
+	var_info micro_info[nn] = { 0 };
 	var_info* info_vars;
 
 	clock_rdtsc creation;

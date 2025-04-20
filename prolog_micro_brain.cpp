@@ -486,6 +486,49 @@ public:
 		else if (s.length() == 2)
 			return (((unsigned char)s[1]) << 8) + (unsigned char)s[0];
 		else {
+			size_t L = s.length();
+			if (L <= 6) {
+				size_t l = 0;
+				size_t u = 0;
+				size_t d = 0;
+				for (size_t i = 0; i < L; i++)
+					if (i == u && (s[i] >= 0x40 && s[i] <= 0x5E))
+						u++;
+					else if (i == l && (s[i] >= 0x60 && s[i] <= 0x7E))
+						l++;
+					else if (i == d && (s[i] >= 0x20 && s[i] <= 0x3E))
+						d++;
+					else
+						break;
+				if (l == L) {
+					unsigned int R = 0;
+					for (int i = 0; i < L; i++) {
+						unsigned int code = s[i] - 0x60 + 1;
+						R <<= 5;
+						R |= code;
+					}
+					return 0x80000000U + R;
+				}
+				else if (u == L) {
+					unsigned int R = 0;
+					for (int i = 0; i < L; i++) {
+						unsigned int code = s[i] - 0x40 + 1;
+						R <<= 5;
+						R |= code;
+					}
+					return 0x40000000U + R;
+				}
+				else if (d == L) {
+					unsigned int R = 0;
+					for (int i = 0; i < L; i++) {
+						unsigned int code = s[i] - 0x20 + 1;
+						R <<= 5;
+						R |= code;
+					}
+					return 0xC0000000U + R;
+				}
+			}
+
 			if (forking) locker.lock();
 			unsigned int result = 0;
 			map<string, unsigned int>::iterator it = hash.find(s);
@@ -513,6 +556,23 @@ public:
 		else if (atom < 65536) {
 			char buf[3] = { (char)(atom & 0xFF), (char)(atom >> 8), 0 };
 			return string(buf);
+		}
+		else if (atom >= 0x40000000U) {
+			char C[7];
+			char base = 0x20;
+			int L = 6;
+			C[L] = 0;
+			if ((atom & 0xC0000000U) == 0x80000000U)
+				base = 0x60;
+			else if ((atom & 0xC0000000U) == 0x40000000U)
+				base = 0x40;
+			atom &= 0x3FFFFFFFU;
+			while (atom) {
+				unsigned int code = atom & 0x1F;
+				C[--L] = code - 1 + base;
+				atom >>= 5;
+			}
+			return string(&C[L]);
 		}
 		else {
 			if (forking) locker.lock();
