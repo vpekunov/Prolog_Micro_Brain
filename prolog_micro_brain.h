@@ -198,7 +198,6 @@ public:
 
 	stack_container<std::function<bool(interpreter*, context*)>> cut_query;
 
-	stack_container<bool> SEQUENTIAL;
 	stack_container<frame_item*> SEQ_RESULT;
 	stack_container<predicate_item*> GENERATORS;
 	stack_container<predicate_item *> SEQ_START;

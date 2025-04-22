@@ -2961,6 +2961,11 @@ public:
 		ending = NULL;
 	}
 
+	virtual bool is_not_pure(std::set<string>& work_set) {
+		work_set.insert(get_id());
+		return true;
+	}
+
 	virtual const string get_id() { return "or"; }
 
 	void set_ending(predicate_item * p) {
@@ -7733,7 +7738,6 @@ public:
 			exit(-3);
 		}
 		// Process
-		CTX->SEQUENTIAL.push(false);
 		for (int m = 0; m < N; m++) {
 			CTX->add_page(locals_in_forked, transactable_facts, this, f->tcopy(CTX, prolog, true), parent->get_item(self_number+1), parent->get_item(ending_number), prolog);
 		}
@@ -7743,11 +7747,13 @@ public:
 };
 
 class predicate_item_join : public predicate_item {
+	bool starred;
 	value* k;
 	bool ending;
 public:
-	predicate_item_join(bool _ending, value * _k, bool _neg, bool _once, bool _call, int num, clause* c, interpreter* _prolog) :
+	predicate_item_join(bool _starred, bool _ending, value * _k, bool _neg, bool _once, bool _call, int num, clause* c, interpreter* _prolog) :
 		predicate_item(_neg, _once, _call, num, c, _prolog) {
+		starred = _starred;
 		ending = _ending;
 		k = _k;
 	}
@@ -7759,6 +7765,8 @@ public:
 	virtual const string get_id() { return "join"; }
 
 	virtual void bind(bool starring) { }
+
+	virtual bool get_starred() { return starred; }
 
 	virtual generated_vars* generate_variants(context * CTX, frame_item* f, vector<value*>*& positional_vals) {
 		if (positional_vals->size() != 0) {
@@ -7778,7 +7786,7 @@ public:
 		if (this->conditional_star_mode && !this->is_starred)
 			return true;
 
-		if ((int)CTX->SEQUENTIAL.size() == 0 || !CTX->SEQUENTIAL.top()) {
+		if (!starred) {
 			int K = -1;
 			int_number* ni = NULL;
 
@@ -7810,8 +7818,6 @@ public:
 			else
 				K = (int)(-0.5 + ni->get_value());
 
-			if (CTX->SEQUENTIAL.size())
-				CTX->SEQUENTIAL.pop();
 			// Process
 			int dummy = 0;
 			return CTX->join(false, K, f, prolog, dummy, NULL);
@@ -7829,8 +7835,6 @@ public:
 
 			generated_vars* _variants = CTX->TRACE[CTX->TRACE.size() - 2];
 			int& _i = CTX->ptrTRACE[CTX->ptrTRACE.size() - 2];
-
-			CTX->SEQUENTIAL.pop();
 
 			bool must_end = !_variants || !_variants->has_variant(_i + 1);
 			int offset = 0;
@@ -8360,10 +8364,6 @@ bool interpreter::process(context * CONTEXT, bool neg, clause * this_clause, pre
 						NULL
 				) : NULL;
 
-			if (p && p->get_starred_end() >= 0) {
-				CNT->SEQUENTIAL.push(true);
-			}
-
 			frame_item * ff = variants ? variants->get_next_variant(CNT, i) : f->copy(CNT);
 			bool success = false;
 			CNT->ptrTRACE.push(i);
@@ -8535,11 +8535,14 @@ bool interpreter::process(context * CONTEXT, bool neg, clause * this_clause, pre
 							predicate_item_fork* FORKER = CNT && CNT->FRAME && CNT->forker ?
 								dynamic_cast<predicate_item_fork*>(CNT->forker) :
 								NULL;
+							predicate_item_join* JFORKER = CNT && CNT->FRAME && CNT->forker ?
+								dynamic_cast<predicate_item_join*>(CNT->forker) :
+								NULL;
 
 							if (CNT && CNT->FRAME && CNT->forker && p &&
 								(
 									FORKER && p == FORKER->get_last(CNT->ptrTRACE.top()) ||
-									!FORKER && CNT->forker->get_starred_end() >= 0 && p == CNT->forker->get_last(CNT->ptrTRACE.top())
+									JFORKER && JFORKER->get_starred() && p->get_next(i) == JFORKER
 								))
 								CNT->FRAME.load()->sync(false, true, CNT, ff);
 
@@ -8718,11 +8721,14 @@ bool interpreter::process(context * CONTEXT, bool neg, clause * this_clause, pre
 						predicate_item_fork* FORKER = CNT && CNT->FRAME && CNT->forker ?
 							dynamic_cast<predicate_item_fork*>(CNT->forker) :
 							NULL;
+						predicate_item_join* JFORKER = CNT && CNT->FRAME && CNT->forker ?
+							dynamic_cast<predicate_item_join*>(CNT->forker) :
+							NULL;
 
 						if (CNT && CNT->FRAME && CNT->forker && p &&
 							(
 								FORKER && p == FORKER->get_last(CNT->ptrTRACE.top()) ||
-								!FORKER && CNT->forker->get_starred_end() >= 0 && p == CNT->forker->get_last(CNT->ptrTRACE.top())
+								JFORKER && JFORKER->get_starred() && p->get_next(i) == JFORKER
 							))
 							CNT->FRAME.load()->sync(false, true, CNT, ff);
 
@@ -8981,7 +8987,7 @@ void interpreter::parse_clause(context * CTX, vector<string> & renew, frame_item
 							p++;
 							if (!v)
 								v = new int_number(1);
-							pi = new predicate_item_join(false, v, false, false, false, num, cl, this);
+							pi = new predicate_item_join(false, false, v, false, false, false, num, cl, this);
 						}
 						else {
 							std::cout << "'}' expected after '{=' or '{=N' [" << s.substr((size_t)(p - 30), 100) << "]!" << endl;
@@ -8993,7 +8999,7 @@ void interpreter::parse_clause(context * CTX, vector<string> & renew, frame_item
 						if (p < s.length() && s[p] == '}') {
 							p++;
 							// {&}
-							pi = new predicate_item_join(false, new int_number(-1), false, false, false, num, cl, this);
+							pi = new predicate_item_join(false, false, new int_number(-1), false, false, false, num, cl, this);
 						} else {
 							std::cout << "Clause [" << s.substr((size_t)(p - 30), 100) << "] : premature end of file!" << endl;
 							exit(2);
@@ -9048,7 +9054,7 @@ void interpreter::parse_clause(context * CTX, vector<string> & renew, frame_item
 						}
 						if (p < s.length() && s[p] == '}') {
 							// Do not p++
-							pi = new predicate_item_join(true, new int_number(-1), false, false, false, num, cl, this);
+							pi = new predicate_item_join(false, true, new int_number(-1), false, false, false, num, cl, this);
 						}
 						bypass_spaces(s, p);
 						if (p < s.length() && s[p] == '{')
@@ -9058,7 +9064,7 @@ void interpreter::parse_clause(context * CTX, vector<string> & renew, frame_item
 						predicate_item* last = fork_stack.top();
 						last->set_starred_end(num);
 
-						pi = new predicate_item_join(true, new int_number(-1), false, false, false, num, cl, this);
+						pi = new predicate_item_join(true, true, new int_number(-1), false, false, false, num, cl, this);
 						pi->set_conditional_star_mode(last->get_conditional_star_mode());
 					}
 					fork_stack.pop();
@@ -9640,7 +9646,7 @@ void interpreter::parse_clause(context * CTX, vector<string> & renew, frame_item
 					p++;
 					if (brackets.size() == 0) {
 						if (cl->is_forking()) {
-							pi = new predicate_item_join(true, new int_number(-1), false, false, false, num++, cl, this);
+							pi = new predicate_item_join(false, true, new int_number(-1), false, false, false, num++, cl, this);
 							cl->add_item(pi);
 						}
 						clause * _cl = new clause(pr);
@@ -9679,7 +9685,7 @@ void interpreter::parse_clause(context * CTX, vector<string> & renew, frame_item
 					p++;
 
 					if (cl->is_forking()) {
-						pi = new predicate_item_join(true, new int_number(-1), false, false, false, num++, cl, this);
+						pi = new predicate_item_join(false, true, new int_number(-1), false, false, false, num++, cl, this);
 						cl->add_item(pi);
 					}
 

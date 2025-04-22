@@ -129,6 +129,9 @@
 
 	run36 :- g_assign('S',[]),*?run23a(A){g_read('S',S),append(S,[A],S1),g_assign('S',S1),fail};g_read('S',S),write(S).
 
+	run37g(A) :- member(A,[1,2,3,4]).
+	run37 :- *run37g(A){write(A),fail}.
+
 	generate_facts(This,N):-
 		>(This,N),
 		!.
@@ -409,7 +412,7 @@
 		),
 		once(
 			set_iteration_star_packet(3),
-			*?for (I, Start, N){
+			*for (I, Start, N){
 				once(
 					LogN is log(I),
 					LogLogN is log(LogN),
