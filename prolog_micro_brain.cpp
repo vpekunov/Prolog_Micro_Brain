@@ -33,7 +33,7 @@
 #include <sched.h>
 #endif
 
-const unsigned int eli = 0x8f;
+const long long eli = 60;
 
 void reverse(char s[])
 {
@@ -100,7 +100,7 @@ unsigned int SBlock[] = {
 0xc190c6e3, 0x07dfb846, 0x6eb88816, 0x2d0dcc4a, 0xa4ccae59, 0x3798670d, 
 0xcbfa9493, 0x4f481d45, 0xeafc8ca8, 0xdb1129d6, 0xb0449e20, 0x0f5407fb, 
 0x6167d9a8, 0xd1f45763, 0x4daa96c3, 0x3bec5958, 0xababa014, 0xb6ccd201, 
-0x38d6279f, 0x02682215, (eli<<24)|0x376cd5, 0x092c237e, 0xbfc56593, 0x32889d2c, 
+0x38d6279f, 0x02682215, 0x8f376cd5, 0x092c237e, 0xbfc56593, 0x32889d2c,
 0x854b3e95, 0x05bb9b43, 0x7dcd5dcd, 0xa02e926c, 0xfae527e5, 0x36a1c330, 
 0x3412e1ae, 0xf257f462, 0x3c4f1d71, 0x30a2e809, 0x68e5f551, 0x9c61ba44, 
 0x5ded0ab8, 0x75ce09c8, 0x9654f93e, 0x698c0cca, 0x243cb3e4, 0x2b062b97, 
@@ -914,7 +914,7 @@ public:
 		return false;
 	};
 
-	virtual string to_str(bool simple = false) { return "__VAR__" + get_name(); }
+	virtual string to_str(bool simple = false) { return /* "__VAR__" + */ get_name(); }
 };
 
 class int_number : public value {
@@ -1885,10 +1885,13 @@ public:
 	}
 };
 
-context::context(bool locals_in_forked, bool transactable_facts, predicate_item* forker, int RESERVE, context* parent, tframe_item* tframe, predicate_item* starting, predicate_item* ending, interpreter* prolog) {
+context::context(bool locals_in_forked, bool transactable_facts, predicate_item* forker, int RESERVE, context* parent, tframe_item* tframe,
+		predicate_item* starting, predicate_item* ending, interpreter* prolog) {
 	this->parent = parent;
 	this->locals_in_forked = locals_in_forked;
 	this->transactable_facts = transactable_facts;
+
+	this->pseudo_time = parent ? parent->pseudo_time : 0;
 
 	if (tframe && parent)
 		INIT = tframe->tcopy(parent, prolog);
@@ -1932,6 +1935,8 @@ context::context(bool locals_in_forked, bool transactable_facts, predicate_item*
 	// FLAGS;
 	LEVELS.reserve(RESERVE);
 	TRACE.reserve(RESERVE);
+	START_TIMES.reserve(RESERVE);
+	START_CLAUSES.reserve(RESERVE);
 	TRACEARGS.reserve(RESERVE);
 	TRACERS.reserve(RESERVE);
 	ptrTRACE.reserve(RESERVE);
@@ -2024,462 +2029,6 @@ void context::apply_transactional_db_to_parent(const std::string & _fact) {
 	}
 }
 
-bool context::join(bool sequential_mode, int K, frame_item* f, interpreter* INTRP, int & sequential, vector<frame_item *> * rest) {
-	std::unique_lock<fastmux> lock(pages_mutex);
-	if (CONTEXTS.size() == 0) {
-		lock.unlock();
-		return true;
-	}
-
-	context* C = this;
-	while (C && !C->THR)
-		C = C->parent;
-	bool forked = C && C->THR;
-
-	CONTEXTS.push_back(this);
-
-	sequential = sequential_mode ? 0 : -1;
-
-	int joined = 0;
-	int success = 0;
-	bool stopped_by_true = false;
-	vector<bool> joineds(CONTEXTS.size(), false);
-	std::set<unsigned long long> names;
-	vector<std::set<unsigned long long>> lnames(CONTEXTS.size(), std::set<unsigned long long>());
-
-	f->add_local_names(false, lnames[CONTEXTS.size() - 1]);
-
-	names = lnames[CONTEXTS.size() - 1];
-
-	do {
-		vector<bool> stoppeds(CONTEXTS.size(), false);
-		vector<bool> rollback(CONTEXTS.size(), false);
-		int stopped = (int)std::count(joineds.begin(), joineds.end(), true);
-		bool mainlined = !joineds[CONTEXTS.size() - 1];
-		if (mainlined) {
-			stoppeds[CONTEXTS.size() - 1] = true;
-			stopped++;
-		}
-		f->register_facts(false, this, lnames[CONTEXTS.size() - 1]);
-		names.insert(lnames[CONTEXTS.size() - 1].begin(), lnames[CONTEXTS.size() - 1].end());
-		while (stopped < CONTEXTS.size()) {
-			for (int i = 0; i < CONTEXTS.size(); i++)
-				if (!joineds[i] && !stoppeds[i] && !rollback[i]) {
-					{
-						std::unique_lock<fastmux> lk(CONTEXTS[i]->THR->get_finished_mutex());
-						while (!CONTEXTS[i]->THR->is_stopped())
-							CONTEXTS[i]->THR->get_finished_var().wait(lk);
-					}
-					rollback[i] = CONTEXTS[i]->rollback;
-					stoppeds[i] = !rollback[i];
-					if (stoppeds[i]) {
-						CONTEXTS[i]->FRAME.load()->add_local_names(CONTEXTS[i]->locals_in_forked, lnames[i]);
-						if (CONTEXTS[i]->transactable_facts)
-							CONTEXTS[i]->FRAME.load()->register_facts(false, CONTEXTS[i], lnames[i]);
-						names.insert(lnames[i].begin(), lnames[i].end());
-					}
-					stopped++;
-				}
-		}
-		stopped -= (int)std::count(rollback.begin(), rollback.end(), true);
-		// In not joineds search for winners
-		vector<vector<int>> M(CONTEXTS.size(), vector<int>(CONTEXTS.size(), 0));
-		std::set<unsigned long long> conflictors;
-		for (const unsigned long long vname : names) {
-			// Conflict Matrix
-			for (int i = 0; i < CONTEXTS.size()-2; i++)
-				for (int j = i + 1; j < CONTEXTS.size()-1; j++)
-					if (stoppeds[i] && stoppeds[j] && (lnames[i].find(vname) != lnames[i].end() && lnames[j].find(vname) != lnames[j].end())) {
-						clock_rdtsc cri, fwi, fri, lwi, lri;
-						CONTEXTS[i]->FRAME.load()->statistics(vname, cri, fwi, fri, lwi, lri);
-						clock_rdtsc crj = 0, fwj = 0, frj = 0, lwj = 0, lrj = 0;
-						if (j == CONTEXTS.size() - 1 && dynamic_cast<tframe_item*>(f) == NULL)
-							/* M[i][j]++ */;
-						else {
-							if (j == CONTEXTS.size() - 1)
-								dynamic_cast<tframe_item*>(f)->statistics(vname, crj, fwj, frj, lwj, lrj);
-							else
-								CONTEXTS[j]->FRAME.load()->statistics(vname, crj, fwj, frj, lwj, lrj);
-							if (fwi || fwj) {
-								if (fwi && fwj) {
-									if (fri && fri <= fwi || frj && frj <= fwj) {
-										M[i][j]++;
-										conflictors.insert(vname);
-									}
-								}
-								else if (fwi) {
-									if ((lwi >= crj) && lrj) {
-										M[i][j]++;
-										conflictors.insert(vname);
-									}
-								}
-								else {
-									if ((lwj >= cri) && lri) {
-										M[i][j]++;
-										conflictors.insert(vname);
-									}
-								}
-							}
-						}
-					}
-		}
-		bool changed;
-		do {
-			changed = false;
-			for (int i = 0; i < CONTEXTS.size(); i++)
-				for (int j = i + 1; j < CONTEXTS.size(); j++)
-					if (M[i][j])
-						for (int k = j + 1; k < CONTEXTS.size(); k++)
-							if (M[j][k] && M[i][k] == 0) {
-								M[i][k] = 1;
-								changed = true;
-							}
-		} while (changed);
-		// Decide
-		int first_winner = mainlined ? (int)(CONTEXTS.size() - 1) : -1;
-		std::map<double, int> other_winners; // key = fw+0.1*id, val = number of thread
-		int first = first_winner < 0 ? 0 : first_winner;
-		int last = first_winner < 0 ? (int)(CONTEXTS.size() - 1) : first_winner;
-
-		std::map<int, double> keys;
-
-		auto get_key = [&](int i)->double {
-			if (stoppeds[i] && CONTEXTS[i]->FRAME.load()) {
-				clock_rdtsc min_time = 0;
-				if (conflictors.size())
-					for (const unsigned long long vname : conflictors /* names */) {
-						if (lnames[i].find(vname) != lnames[i].end()) {
-							clock_rdtsc cr, fw, fr, lw, lr;
-							CONTEXTS[i]->FRAME.load()->statistics(vname, cr, fw, fr, lw, lr);
-							if (fw && (!min_time || fw < min_time && fw >= cr)) {
-								min_time = fw;
-							}
-						}
-					}
-				else
-					for (const unsigned long long vname : names) {
-						if (lnames[i].find(vname) != lnames[i].end()) {
-							clock_rdtsc cr, fw, fr, lw, lr;
-							CONTEXTS[i]->FRAME.load()->statistics(vname, cr, fw, fr, lw, lr);
-							if (fw && (!min_time || fw < min_time && fw >= cr)) {
-								min_time = fw;
-							}
-						}
-					}
-				return min_time + 0.1 * i;
-			}
-			else
-				return i * 1E50;
-		};
-
-		for (int j = 0; j < CONTEXTS.size(); j++) {
-			keys.insert({ j, get_key(j) });
-		}
-
-		for (int i = first; i <= last; i++)
-			if (stoppeds[i]) {
-				std::set<int> conflicted;
-				conflicted.insert(i);
-				for (int k = 0; k < i; k++)
-					if (M[k][i])
-						conflicted.insert(k);
-				for (int k = i + 1; k < CONTEXTS.size(); k++)
-					if (M[i][k])
-						conflicted.insert(k);
-				std::map<double, int> parallels;
-				for (int j = 0; j < CONTEXTS.size(); j++) {
-					if (i != j && stoppeds[j] && conflicted.find(j) == conflicted.end())
-						parallels.insert({ keys[j], j });
-				}
-				int candidate = i;
-				if (parallels.size() > 1) {
-					double key = keys[i];
-					if (!mainlined) parallels.insert({ key, i });
-					candidate = parallels.begin()->second;
-					if (!mainlined) parallels.erase(key);
-					for (int j = 0; j < CONTEXTS.size(); j++)
-						for (int k = j + 1; k < CONTEXTS.size(); k++)
-							if (M[j][k]) {
-								parallels.erase(keys[j]);
-								parallels.erase(keys[k]);
-							}
-				}
-				if (mainlined) {
-					parallels.insert({ keys[candidate], candidate });
-					parallels.erase(keys[i]);
-					parallels.insert({ -keys[i], i });
-					candidate = i;
-				}
-				else {
-					parallels.insert({ keys[i], i });
-					parallels.erase(keys[candidate]);
-					parallels.insert({ -keys[candidate], candidate });
-				}
-				if ((sequential < 0 || candidate == sequential || parallels.find(keys[sequential]) != parallels.end() || parallels.find(-keys[sequential]) != parallels.end()) &&
-					parallels.size() > other_winners.size()) {
-					other_winners = parallels;
-					first_winner = candidate;
-				}
-			}
-		if (first_winner < 0) {
-			if (sequential >= 0)
-				first_winner = sequential;
-			else {
-				double min_val = 1E70;
-				for (auto & p : keys)
-					if (p.second < min_val) {
-						min_val = p.second;
-						first_winner = p.first;
-					}
-			}
-			if (first_winner >= 0) {
-				double key = keys[first_winner];
-				other_winners.erase(key);
-				other_winners.insert({ -key, first_winner });
-			}
-		}
-		f->unregister_facts(false, this);
-		if (mainlined)
-		{
-			double key = keys[first_winner];
-			other_winners.erase(key);
-			other_winners.erase(-key);
-			joineds[CONTEXTS.size() - 1] = true;
-			stoppeds[CONTEXTS.size() - 1] = false;
-			success++;
-			joined++;
-		}
-		if (sequential >= 0 && (other_winners.size() == 0 || other_winners.begin()->second != sequential)) {
-			other_winners.clear();
-			if (!rollback[sequential])
-				other_winners.insert({ keys[sequential], sequential });
-		}
-		// Set vars by threads with non-zero first_writes
-		stopped_by_true = false;
-		for (auto & _winner : other_winners) {
-			int winner = _winner.second;
-			if (sequential >= 0 && (rollback[winner] || winner != sequential)) {
-				for (int rollb = sequential; rollb < CONTEXTS.size()-1; rollb++) {
-					stoppeds[rollb] = false;
-					rollback[rollb] = true;
-					double key = keys[rollb];
-					other_winners.erase(key);
-					other_winners.erase(-key);
-					stopped--;
-				}
-				break;
-			}
-			for (const unsigned long long vname : names)
-				if (lnames[winner].find(vname) != lnames[winner].end() && CONTEXTS[winner]->FRAME.load()->first_write(vname))
-				{
-					if (get_first_char(vname) == '!') {
-						if (DB != CONTEXTS[winner]->DB) {
-							string _vname = atomizer.get_string(get_name_code(vname));
-							string fact = _vname.substr(1);
-							std::unique_lock<fastmux> dblock(*DBLOCK);
-							std::unique_lock<fastmux> wdblock(*CONTEXTS[winner]->DBLOCK);
-							CONTEXTS[winner]->apply_transactional_db_to_parent(fact);
-							wdblock.unlock();
-							dblock.unlock();
-						}
-					}
-					else if (get_first_char(vname) == '*' || CONTEXTS[winner]->THR->get_result())
-					{
-						f->lock();
-						value* old = f->get(true, this, vname);
-						value* cur = CONTEXTS[winner]->FRAME.load()->get(false, CONTEXTS[winner], vname);
-						if (cur)
-							if (old && get_first_char(vname) != '*') {
-								if (!old->unify(this, f, cur))
-									CONTEXTS[winner]->THR->set_result(false);
-							}
-							else
-								f->set(true, this, vname, cur);
-						f->unlock();
-					}
-				}
-			if (sequential >= 0) {
-				sequential++;
-				if (CONTEXTS[winner]->THR->get_result()) {
-					for (int rollb = sequential; rollb < CONTEXTS.size()-1; rollb++) {
-						stoppeds[rollb] = false;
-						rollback[rollb] = true;
-						double key = keys[rollb];
-						other_winners.erase(key);
-						other_winners.erase(-key);
-						stopped--;
-					}
-					stopped_by_true = true;
-					break;
-				}
-			}
-		}
-		// Join first_winner && other_winners
-		for (auto & _i : other_winners) {
-			int i = _i.second;
-			if (stoppeds[i]) {
-				CONTEXTS[i]->THR->set_context(NULL);
-				CONTEXTS[i]->THR->set_terminated(true);
-				{
-					std::lock_guard<fastmux> lk(CONTEXTS[i]->THR->get_stopped_mutex());
-					CONTEXTS[i]->THR->set_stopped(false);
-					CONTEXTS[i]->THR->get_stopped_var().notify_one();
-				}
-				{
-					std::unique_lock<fastmux> lk(CONTEXTS[i]->THR->get_terminated_mutex());
-					while (CONTEXTS[i]->THR->is_terminated())
-						CONTEXTS[i]->THR->get_terminated_var().wait(lk);
-				}
-				joineds[i] = true;
-				if (CONTEXTS[i]->THR->get_result())
-					success++;
-				joined++;
-			}
-		}
-		for (int i = 0; i < CONTEXTS.size(); i++)
-			if (stoppeds[i] || rollback[i]) {
-				double key = keys[i];
-				if (rollback[i] || other_winners.find(key) == other_winners.end() && other_winners.find(-key) == other_winners.end()) {
-					if (CONTEXTS[i]->transactable_facts) { // Undo facts
-						std::unique_lock<fastmux> lock(*DBLOCK);
-						std::unique_lock<fastmux> ilock(*CONTEXTS[i]->DBLOCK);
-						// Delete journal, including deleted nodes
-						map<unsigned long long, std::atomic<journal*>>::iterator itj = CONTEXTS[i]->DBJournal->begin();
-						while (itj != CONTEXTS[i]->DBJournal->end()) {
-							delete itj->second;
-							itj++;
-						}
-						CONTEXTS[i]->DBJournal->clear();
-						vector<term*> Q;
-						// Clear local DB
-						map< string, std::atomic<vector<term*>*>>::iterator itd = CONTEXTS[i]->DB->begin();
-						while (itd != CONTEXTS[i]->DB->end()) {
-							if (itd->second) {
-								for (term* v : *itd->second)
-									Q.push_back(v);
-								delete itd->second;
-							}
-							itd++;
-						}
-						CONTEXTS[i]->DB->clear();
-						// Reload DB
-						itd = DB->begin();
-						while (itd != DB->end()) {
-							if (itd->second) {
-								(*CONTEXTS[i]->DB)[itd->first] = new vector<term*>(*itd->second);
-								for (term* v : *itd->second)
-									v->use();
-							}
-							itd++;
-						}
-						for (term* v : Q) {
-							v->free();
-						}
-						ilock.unlock();
-						lock.unlock();
-					}
-					// CONTEXTS[i]->REFRESH(sequential_mode, f, this, INTRP);
-					if (stopped_by_true) {
-						CONTEXTS[i]->THR->set_context(NULL);
-						CONTEXTS[i]->THR->set_terminated(true);
-						{
-							std::lock_guard<fastmux> lk(CONTEXTS[i]->THR->get_stopped_mutex());
-							CONTEXTS[i]->THR->set_stopped(false);
-							CONTEXTS[i]->THR->get_stopped_var().notify_one();
-						}
-						{
-							std::unique_lock<fastmux> lk(CONTEXTS[i]->THR->get_terminated_mutex());
-							while (CONTEXTS[i]->THR->is_terminated())
-								CONTEXTS[i]->THR->get_terminated_var().wait(lk);
-						}
-						joineds[i] = true;
-						if (CONTEXTS[i]->THR->get_result())
-							success++;
-						joined++;
-					}
-					else {
-						FRAMES_TO_DELETE.push(CONTEXTS[i]->FRAME.load());
-						// if (sequential >= 0) {
-						tframe_item* newf = CONTEXTS[i]->INIT.load()->tcopy(this, INTRP);
-						newf->forced_import_transacted_globs(this, f);
-						CONTEXTS[i]->FRAME.store(newf);
-						// }
-						// else
-						//	CONTEXTS[i]->FRAME.store(f->tcopy(this, INTRP, false));
-						CONTEXTS[i]->set_rollback(false);
-						{
-							std::lock_guard<fastmux> lk(CONTEXTS[i]->THR->get_stopped_mutex());
-							CONTEXTS[i]->THR->set_stopped(false);
-							CONTEXTS[i]->THR->get_stopped_var().notify_one();
-						}
-					}
-				}
-			}
-	} while (joined < CONTEXTS.size());
-
-	joined--;
-	success--;
-	CONTEXTS.pop_back();
-
-	bool result =
-		(sequential >= 0 && stopped_by_true) ||
-		(sequential < 0 && (K < 0 && success == CONTEXTS.size() || K >= 0 && success >= K));
-
-	prolog->GLOCK.lock();
-	f->lock();
-	for (const unsigned long long vname : names)
-		if (get_first_char(vname) != '!')
-		{
-			value* v = f->get(true, this, vname);
-			for (int i = 0; i < CONTEXTS.size(); i++)
-				CONTEXTS[i]->FRAME.load()->set(false, CONTEXTS[i], vname, NULL);
-			if (!forked && v && get_first_char(vname) == '*') {
-				string _vname = atomizer.get_string(get_name_code(vname));
-				string src_name = _vname.substr(1);
-				std::map<std::string, value*>::iterator it = prolog->GVars.find(src_name);
-				if (it != prolog->GVars.end()) {
-					it->second->free();
-				}
-				prolog->GVars[src_name] = v->const_copy(this, f);
-			}
-		}
-	f->unlock();
-	prolog->GLOCK.unlock();
-
-	int ctx = 0;
-	bool cutted = false;
-	for (context* C : CONTEXTS) {
-		tthread* t = C->THR;
-		if (ctx < sequential) {
-			for (int i = 0; i < C->cut_query.size(); i++) {
-				if (C->cut_query[i](prolog, this) && parent)
-					cut_query.push_back(C->cut_query[i]);
-				cutted = true;
-			}
-		}
-		else if (stopped_by_true)
-			if (rest) {
-				rest->push_back(C->INIT.load());
-				C->INIT.store(NULL);
-			}
-		delete C;
-		prolog->THREAD_POOL->free_thread(t);
-		ctx++;
-	}
-	if (cutted) {
-		sequential = (int) CONTEXTS.size();
-		if (rest) {
-			for (auto ff : *rest)
-				delete ff;
-			rest->clear();
-		}
-	}
-	CONTEXTS.clear();
-
-	lock.unlock();
-	return result;
-}
-
 void context::clearDBJournals() {
 	map<unsigned long long, std::atomic<journal*>>::iterator itj = DBJournal->begin();
 	while (itj != DBJournal->end()) {
@@ -2520,29 +2069,50 @@ context::~context() {
 }
 
 void predicate_item_user::bind(bool starring) {
+	if (!starring) {
+		cached_is_not_pure = false;
+		cached_is_not_pure_result = 0;
+	}
 	predicate_item::bind(starring);
 	if (!starring)
 		if (prolog->PREDICATES.find(id) == prolog->PREDICATES.end())
 			user_p = NULL;
 		else
 			user_p = prolog->PREDICATES[id];
+	else if (starred_end >= 0 && user_p) {
+		cout << "Predicate item '" << id << "' has USER attribute and can't be starred!" << endl;
+		exit(5200);
+	}
 }
 
-bool predicate_item_user::is_not_pure(std::set<string>& work_set) {
+int predicate_item_user::is_not_pure(std::set<string> * work_set) {
 	if (user_p) {
-		if (work_set.find(get_id()) != work_set.end())
-			return false;
-		work_set.insert(get_id());
+		if (cached_is_not_pure)
+			return cached_is_not_pure_result;
+		std::set<string>* _work_set = work_set ? work_set : new std::set<string>();
+		if (_work_set->find(get_id()) != _work_set->end()) {
+			cached_is_not_pure = true;
+			cached_is_not_pure_result = false;
+			return 0;
+		}
+		_work_set->insert(get_id());
 		for (int i = 0; i < user_p->num_clauses(); i++) {
 			clause* c = user_p->get_clause(i);
 			for (int j = 0; j < c->num_items(); j++)
-				if (c->get_item(j)->is_not_pure(work_set))
-					return true;
+				if (c->get_item(j)->is_not_pure(_work_set) > 0) {
+					cached_is_not_pure = true;
+					cached_is_not_pure_result = 1;
+					return 1;
+				}
 		}
-		return false;
+		if (!work_set)
+			delete _work_set;
+		cached_is_not_pure = true;
+		cached_is_not_pure_result = 0;
+		return 0;
 	}
 	else
-		return false;
+		return 0;
 }
 
 generated_vars * predicate_item_user::generate_variants(context * CTX, frame_item * f, vector<value *> * & positional_vals) {
@@ -2605,7 +2175,8 @@ generated_vars * predicate_item_user::generate_variants(context * CTX, frame_ite
 	return result;
 }
 
-bool predicate_item_user::processing(context * CONTEXT, bool line_neg, int variant, generated_vars * variants, vector<value *> ** positional_vals, frame_item * up_f, context * up_c) {
+bool predicate_item_user::processing(context * CONTEXT, bool line_neg, int variant, generated_vars * variants, vector<value *> ** positional_vals,
+		frame_item * up_f, context * up_c) {
 	predicate_item * next = get_next(variant);
 
 	frame_item* f = dynamic_cast<tframe_item *>(up_f) ? new tframe_item(32, 5, CONTEXT, up_f) : new frame_item(32, 5, CONTEXT, up_f);
@@ -2626,6 +2197,9 @@ bool predicate_item_user::processing(context * CONTEXT, bool line_neg, int varia
 	CONTEXT->PARENT_CALL_VARIANT.push(variant);
 
 	bool yes = false;
+
+	predicate* pp = parent ? parent->get_predicate() : NULL;
+	if (pp) pp->mark_runned();
 
 	if (prolog->retrieve(CONTEXT, f, user_p->get_clause(variant), *positional_vals, true)) {
 		yes = user_p->get_clause(variant)->num_items() == 0;
@@ -2666,6 +2240,16 @@ bool predicate_item_user::processing(context * CONTEXT, bool line_neg, int varia
 	delete f;
 
 	return yes;
+}
+
+string interpreter::export_str(bool introduce_new_parallelism, std::set<string> * exported) {
+	string result;
+
+	for (const string & s : *exported) {
+		PREDICATES[s]->add_export(result, introduce_new_parallelism);
+	}
+
+	return result;
 }
 
 double interpreter::evaluate(context * CTX, frame_item * ff, const string & expression, size_t & p) {
@@ -2936,8 +2520,23 @@ public:
 };
 
 void clause::bind(bool starring) {
+	if (!starring) {
+		cached_is_not_pure_result = 0;
+	}
 	for (predicate_item * p : items)
 		p->bind(starring);
+	if (starring) {
+		cached_is_not_pure_result = 0;
+		std::set<string> work_set;
+		for (predicate_item* p : items) {
+			int res = p->is_not_pure(&work_set);
+			if (res > 0) {
+				cached_is_not_pure_result = res;
+				return;
+			} else if (res < 0)
+				cached_is_not_pure_result = res;
+		}
+	}
 }
 
 predicate::~predicate() {
@@ -2961,11 +2560,15 @@ public:
 		ending = NULL;
 	}
 
-	virtual bool is_not_pure(std::set<string>& work_set) {
-		work_set.insert(get_id());
-		return true;
+	virtual int is_not_pure(std::set<string> * work_set) {
+		work_set->insert(get_id());
+		return -1;
 	}
 
+	virtual void contextual_export(std::set<int>& end_points, string& result, string& offset, bool introduce_new_parallelism) {
+		result += ";";
+	}
+	
 	virtual const string get_id() { return "or"; }
 
 	void set_ending(predicate_item * p) {
@@ -2996,6 +2599,24 @@ public:
 
 	virtual const string get_id() { return "left_bracket"; }
 
+	virtual void contextual_export(std::set<int>& end_points, string& result, string& offset, bool introduce_new_parallelism) {
+		if (critical) {
+			result += "*";
+			map<string, recursive_mutex*>::iterator it = prolog->STARLOCKS.begin();
+			while (it != prolog->STARLOCKS.end()) {
+				if (it->second == critical) {
+					result += "[";
+					result += it->first;
+					result += "]";
+					break;
+				}
+				it++;
+			}
+		}
+		result += "(";
+		offset += "    ";
+	}
+
 	void push_branch(predicate_item * p) {
 		branches.push_back(p);
 	}
@@ -3025,6 +2646,12 @@ public:
 
 	virtual const string get_id() { return "right_bracket"; }
 
+	virtual void contextual_export(std::set<int>& end_points, string& result, string& offset, bool introduce_new_parallelism) {
+		result.erase(result.length() - 4);
+		result += ")";
+		offset.erase(offset.length() - 4);
+	}
+
 	predicate_left_bracket * get_corresponding() { return left_bracket; }
 
 	virtual generated_vars * generate_variants(context * CTX, frame_item * f, vector<value *> * & positional_vals) {
@@ -3040,6 +2667,10 @@ public:
 	predicate_item_eq(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) { }
 
 	virtual const string get_id() { return "eq"; }
+
+	virtual void contextual_export(std::set<int>& end_points, string& result, string& offset, bool introduce_new_parallelism) {
+		simple_export("=", result, offset, introduce_new_parallelism);
+	}
 
 	virtual generated_vars * generate_variants(context * CTX, frame_item * f, vector<value *> * & positional_vals) {
 		if (positional_vals->size() != 2) {
@@ -3080,6 +2711,10 @@ public:
 
 	virtual const string get_id() { return "neq"; }
 
+	virtual void contextual_export(std::set<int>& end_points, string& result, string& offset, bool introduce_new_parallelism) {
+		simple_export("\\=", result, offset, introduce_new_parallelism);
+	}
+
 	virtual generated_vars * generate_variants(context * CTX, frame_item * f, vector<value *> * & positional_vals) {
 		if (positional_vals->size() != 2) {
 			std::cout << "neq(A,B) incorrect call!" << endl;
@@ -3109,6 +2744,10 @@ public:
 	predicate_item_less(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) { }
 
 	virtual const string get_id() { return "less"; }
+
+	virtual void contextual_export(std::set<int>& end_points, string& result, string& offset, bool introduce_new_parallelism) {
+		simple_export("<", result, offset, introduce_new_parallelism);
+	}
 
 	virtual generated_vars * generate_variants(context * CTX, frame_item * f, vector<value *> * & positional_vals) {
 		if (positional_vals->size() != 2) {
@@ -3152,6 +2791,10 @@ public:
 	predicate_item_greater(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) { }
 
 	virtual const string get_id() { return "greater"; }
+
+	virtual void contextual_export(std::set<int>& end_points, string& result, string& offset, bool introduce_new_parallelism) {
+		simple_export(">", result, offset, introduce_new_parallelism);
+	}
 
 	virtual generated_vars * generate_variants(context * CTX, frame_item * f, vector<value *> * & positional_vals) {
 		if (positional_vals->size() != 2) {
@@ -3247,6 +2890,10 @@ public:
 	predicate_item_term_split(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) { }
 
 	virtual const string get_id() { return "split(=..)"; }
+
+	virtual void contextual_export(std::set<int>& end_points, string& result, string& offset, bool introduce_new_parallelism) {
+		simple_export("=..", result, offset, introduce_new_parallelism);
+	}
 
 	virtual generated_vars * generate_variants(context * CTX, frame_item * f, vector<value *> * & positional_vals) {
 		if (positional_vals->size() != 2) {
@@ -3399,9 +3046,9 @@ public:
 
 	virtual const string get_id() { return "load_classes"; }
 
-	virtual bool is_not_pure(std::set<string>& work_set) {
-		work_set.insert(get_id());
-		return true;
+	virtual int is_not_pure(std::set<string>* work_set) {
+		work_set->insert(get_id());
+		return 1;
 	}
 
 	virtual generated_vars * generate_variants(context * CTX, frame_item * f, vector<value *> * & positional_vals) {
@@ -3449,9 +3096,9 @@ public:
 
 	virtual const string get_id() { return "init_xpathing"; }
 
-	virtual bool is_not_pure(std::set<string>& work_set) {
-		work_set.insert(get_id());
-		return true;
+	virtual int is_not_pure(std::set<string>* work_set) {
+		work_set->insert(get_id());
+		return 1;
 	}
 
 	virtual generated_vars * generate_variants(context * CTX, frame_item * f, vector<value *> * & positional_vals) {
@@ -3505,9 +3152,9 @@ public:
 
 	virtual const string get_id() { return "induct_xpathing"; }
 
-	virtual bool is_not_pure(std::set<string>& work_set) {
-		work_set.insert(get_id());
-		return true;
+	virtual int is_not_pure(std::set<string>* work_set) {
+		work_set->insert(get_id());
+		return 1;
 	}
 
 	virtual generated_vars * generate_variants(context * CTX, frame_item * f, vector<value *> * & positional_vals) {
@@ -3609,9 +3256,9 @@ public:
 
 	virtual const string get_id() { return "import_model_after_induct"; }
 
-	virtual bool is_not_pure(std::set<string>& work_set) {
-		work_set.insert(get_id());
-		return true;
+	virtual int is_not_pure(std::set<string>* work_set) {
+		work_set->insert(get_id());
+		return 1;
 	}
 
 	virtual generated_vars * generate_variants(context * CTX, frame_item * f, vector<value *> * & positional_vals) {
@@ -3752,9 +3399,9 @@ public:
 
 	virtual const string get_id() { return "unload_classes"; }
 
-	virtual bool is_not_pure(std::set<string>& work_set) {
-		work_set.insert(get_id());
-		return true;
+	virtual int is_not_pure(std::set<string>* work_set) {
+		work_set->insert(get_id());
+		return 1;
 	}
 
 	virtual generated_vars * generate_variants(context * CTX, frame_item * f, vector<value *> * & positional_vals) {
@@ -3843,7 +3490,7 @@ public:
 		Dir = dir;
 	}
 
-	virtual const string get_id() { return "get_(i/o)contacts"; }
+	virtual const string get_id() { return Dir == dirInput ? "get_icontacts" : "get_ocontacts"; }
 
 	virtual generated_vars * generate_variants(context * CTX, frame_item * f, vector<value *> * & positional_vals) {
 		if (positional_vals->size() != 2) {
@@ -4129,6 +3776,19 @@ public:
 
 	virtual const string get_id() { return "cut(!)"; }
 
+	virtual void contextual_export(std::set<int>& end_points, string& result, string& offset, bool introduce_new_parallelism) {
+		if (frontier) {
+			size_t pos = result.rfind(',');
+			if (pos == string::npos)
+				result += "!";
+			else {
+				result.erase(pos);
+				result += "->";
+			}
+		} else
+			result += "!";
+	}
+
 	virtual generated_vars * generate_variants(context * CTX, frame_item * f, vector<value *> * & positional_vals) {
 		if (prolog->block_process(CTX, false, true, frontier) && CTX && CTX->parent)
 			CTX->cut_query.push_back(
@@ -4153,6 +3813,12 @@ public:
 
 	~predicate_item_is() {
 		arg->free();
+	}
+
+	virtual void contextual_export(std::set<int>& end_points, string& result, string& offset, bool introduce_new_parallelism) {
+		result += arg->export_str(false, false);
+		result += " is ";
+		result += expression;
 	}
 
 	virtual const string get_id() { return "is"; }
@@ -4960,7 +4626,7 @@ public:
 		SEP = sep;
 	}
 
-	virtual const string get_id() { return "atom_hex[s]"; }
+	virtual const string get_id() { return SEP ? "atom_hexs" : "atom_hex"; }
 
 	virtual generated_vars * generate_variants(context * CTX, frame_item * f, vector<value *> * & positional_vals) {
 		if (positional_vals->size() != 2) {
@@ -5141,9 +4807,9 @@ public:
 
 	virtual const string get_id() { return "change_directory"; }
 
-	virtual bool is_not_pure(std::set<string>& work_set) {
-		work_set.insert(get_id());
-		return true;
+	virtual int is_not_pure(std::set<string>* work_set) {
+		work_set->insert(get_id());
+		return 1;
 	}
 
 	virtual generated_vars * generate_variants(context * CTX, frame_item * f, vector<value *> * & positional_vals) {
@@ -5180,9 +4846,9 @@ public:
 
 	virtual const string get_id() { return "open_url"; }
 
-	virtual bool is_not_pure(std::set<string>& work_set) {
-		work_set.insert(get_id());
-		return true;
+	virtual int is_not_pure(std::set<string>* work_set) {
+		work_set->insert(get_id());
+		return 1;
 	}
 
 	virtual generated_vars * generate_variants(context * CTX, frame_item * f, vector<value *> * & positional_vals) {
@@ -5240,9 +4906,9 @@ public:
 
 	virtual const string get_id() { return "track_post"; }
 
-	virtual bool is_not_pure(std::set<string>& work_set) {
-		work_set.insert(get_id());
-		return true;
+	virtual int is_not_pure(std::set<string>* work_set) {
+		work_set->insert(get_id());
+		return 1;
 	}
 
 	virtual generated_vars * generate_variants(context * CTX, frame_item * f, vector<value *> * & positional_vals) {
@@ -5302,9 +4968,9 @@ public:
 
 	virtual const string get_id() { return "consistency"; }
 
-	virtual bool is_not_pure(std::set<string>& work_set) {
-		work_set.insert(get_id());
-		return true;
+	virtual int is_not_pure(std::set<string>* work_set) {
+		work_set->insert(get_id());
+		return 1;
 	}
 
 	virtual generated_vars * generate_variants(context * CTX, frame_item * f, vector<value *> * & positional_vals) {
@@ -5643,7 +5309,7 @@ class predicate_item_max_list : public predicate_item {
 public:
 	predicate_item_max_list(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) { }
 
-	virtual const string get_id() { return "max__list"; }
+	virtual const string get_id() { return "max_list"; }
 
 	virtual generated_vars * generate_variants(context * CTX, frame_item * f, vector<value *> * & positional_vals) {
 		if (positional_vals->size() != 2) {
@@ -5848,9 +5514,9 @@ public:
 
 	virtual const string get_id() { return "listing"; }
 
-	virtual bool is_not_pure(std::set<string>& work_set) {
-		work_set.insert(get_id());
-		return true;
+	virtual int is_not_pure(std::set<string>* work_set) {
+		work_set->insert(get_id());
+		return 1;
 	}
 
 	virtual generated_vars * generate_variants(context * CTX, frame_item * f, vector<value *> * & positional_vals) {
@@ -6144,9 +5810,9 @@ public:
 
 	virtual const string get_id() { return "consult"; }
 
-	virtual bool is_not_pure(std::set<string>& work_set) {
-		work_set.insert(get_id());
-		return true;
+	virtual int is_not_pure(std::set<string>* work_set) {
+		work_set->insert(get_id());
+		return 1;
 	}
 
 	virtual generated_vars * generate_variants(context * CTX, frame_item * f, vector<value *> * & positional_vals) {
@@ -6177,9 +5843,9 @@ public:
 
 	virtual const string get_id() { return "open"; }
 
-	virtual bool is_not_pure(std::set<string>& work_set) {
-		work_set.insert(get_id());
-		return true;
+	virtual int is_not_pure(std::set<string>* work_set) {
+		work_set->insert(get_id());
+		return 1;
 	}
 
 	virtual generated_vars * generate_variants(context * CTX, frame_item * f, vector<value *> * & positional_vals) {
@@ -6220,9 +5886,9 @@ public:
 
 	virtual const string get_id() { return "close"; }
 
-	virtual bool is_not_pure(std::set<string>& work_set) {
-		work_set.insert(get_id());
-		return true;
+	virtual int is_not_pure(std::set<string>* work_set) {
+		work_set->insert(get_id());
+		return 1;
 	}
 
 	virtual generated_vars * generate_variants(context * CTX, frame_item * f, vector<value *> * & positional_vals) {
@@ -6253,9 +5919,9 @@ public:
 
 	virtual const string get_id() { return "mars"; }
 
-	virtual bool is_not_pure(std::set<string>& work_set) {
-		work_set.insert(get_id());
-		return true;
+	virtual int is_not_pure(std::set<string>* work_set) {
+		work_set->insert(get_id());
+		return 1;
 	}
 
 	virtual generated_vars * generate_variants(context * CTX, frame_item * f, vector<value *> * & positional_vals) {
@@ -6339,9 +6005,9 @@ public:
 
 	virtual const string get_id() { return "mars_decode"; }
 
-	virtual bool is_not_pure(std::set<string>& work_set) {
-		work_set.insert(get_id());
-		return true;
+	virtual int is_not_pure(std::set<string>* work_set) {
+		work_set->insert(get_id());
+		return 1;
 	}
 
 	virtual generated_vars * generate_variants(context * CTX, frame_item * f, vector<value *> * & positional_vals) {
@@ -6474,9 +6140,9 @@ public:
 
 	virtual const string get_id() { return "write"; }
 
-	virtual bool is_not_pure(std::set<string>& work_set) {
-		work_set.insert(get_id());
-		return true;
+	virtual int is_not_pure(std::set<string>* work_set) {
+		work_set->insert(get_id());
+		return 1;
 	}
 
 	virtual generated_vars * generate_variants(context * CTX, frame_item * f, vector<value *> * & positional_vals) {
@@ -6546,9 +6212,9 @@ public:
 
 	virtual const string get_id() { return "write_term"; }
 
-	virtual bool is_not_pure(std::set<string>& work_set) {
-		work_set.insert(get_id());
-		return true;
+	virtual int is_not_pure(std::set<string>* work_set) {
+		work_set->insert(get_id());
+		return 1;
 	}
 
 	virtual generated_vars * generate_variants(context * CTX, frame_item * f, vector<value *> * & positional_vals) {
@@ -6652,9 +6318,9 @@ public:
 
 	virtual const string get_id() { return "nl"; }
 
-	virtual bool is_not_pure(std::set<string>& work_set) {
-		work_set.insert(get_id());
-		return true;
+	virtual int is_not_pure(std::set<string>* work_set) {
+		work_set->insert(get_id());
+		return 1;
 	}
 
 	virtual generated_vars * generate_variants(context * CTX, frame_item * f, vector<value *> * & positional_vals) {
@@ -6688,9 +6354,9 @@ public:
 
 	virtual const string get_id() { return "file_exists"; }
 
-	virtual bool is_not_pure(std::set<string>& work_set) {
-		work_set.insert(get_id());
-		return true;
+	virtual int is_not_pure(std::set<string>* work_set) {
+		work_set->insert(get_id());
+		return 1;
 	}
 
 	virtual generated_vars * generate_variants(context * CTX, frame_item * f, vector<value *> * & positional_vals) {
@@ -6721,9 +6387,9 @@ public:
 
 	virtual const string get_id() { return "unlink"; }
 
-	virtual bool is_not_pure(std::set<string>& work_set) {
-		work_set.insert(get_id());
-		return true;
+	virtual int is_not_pure(std::set<string>* work_set) {
+		work_set->insert(get_id());
+		return 1;
 	}
 
 	virtual generated_vars * generate_variants(context * CTX, frame_item * f, vector<value *> * & positional_vals) {
@@ -6755,9 +6421,9 @@ public:
 
 	virtual const string get_id() { return "rename_file"; }
 
-	virtual bool is_not_pure(std::set<string>& work_set) {
-		work_set.insert(get_id());
-		return true;
+	virtual int is_not_pure(std::set<string>* work_set) {
+		work_set->insert(get_id());
+		return 1;
 	}
 
 	virtual generated_vars * generate_variants(context * CTX, frame_item * f, vector<value *> * & positional_vals) {
@@ -6795,9 +6461,9 @@ public:
 
 	virtual const string get_id() { return "tell"; }
 
-	virtual bool is_not_pure(std::set<string>& work_set) {
-		work_set.insert(get_id());
-		return true;
+	virtual int is_not_pure(std::set<string>* work_set) {
+		work_set->insert(get_id());
+		return 1;
 	}
 
 	virtual generated_vars * generate_variants(context * CTX, frame_item * f, vector<value *> * & positional_vals) {
@@ -6831,9 +6497,9 @@ public:
 
 	virtual const string get_id() { return "see"; }
 
-	virtual bool is_not_pure(std::set<string>& work_set) {
-		work_set.insert(get_id());
-		return true;
+	virtual int is_not_pure(std::set<string>* work_set) {
+		work_set->insert(get_id());
+		return 1;
 	}
 
 	virtual generated_vars * generate_variants(context * CTX, frame_item * f, vector<value *> * & positional_vals) {
@@ -6867,9 +6533,9 @@ public:
 
 	virtual const string get_id() { return "telling"; }
 
-	virtual bool is_not_pure(std::set<string>& work_set) {
-		work_set.insert(get_id());
-		return true;
+	virtual int is_not_pure(std::set<string>* work_set) {
+		work_set->insert(get_id());
+		return 1;
 	}
 
 	virtual generated_vars * generate_variants(context * CTX, frame_item * f, vector<value *> * & positional_vals) {
@@ -6903,9 +6569,9 @@ public:
 
 	virtual const string get_id() { return "seeing"; }
 
-	virtual bool is_not_pure(std::set<string>& work_set) {
-		work_set.insert(get_id());
-		return true;
+	virtual int is_not_pure(std::set<string>* work_set) {
+		work_set->insert(get_id());
+		return 1;
 	}
 
 	virtual generated_vars * generate_variants(context * CTX, frame_item * f, vector<value *> * & positional_vals) {
@@ -6939,9 +6605,9 @@ public:
 
 	virtual const string get_id() { return "told"; }
 
-	virtual bool is_not_pure(std::set<string>& work_set) {
-		work_set.insert(get_id());
-		return true;
+	virtual int is_not_pure(std::set<string>* work_set) {
+		work_set->insert(get_id());
+		return 1;
 	}
 
 	virtual generated_vars * generate_variants(context * CTX, frame_item * f, vector<value *> * & positional_vals) {
@@ -6970,9 +6636,9 @@ public:
 
 	virtual const string get_id() { return "seen"; }
 
-	virtual bool is_not_pure(std::set<string>& work_set) {
-		work_set.insert(get_id());
-		return true;
+	virtual int is_not_pure(std::set<string>* work_set) {
+		work_set->insert(get_id());
+		return 1;
 	}
 
 	virtual generated_vars * generate_variants(context * CTX, frame_item * f, vector<value *> * & positional_vals) {
@@ -7003,9 +6669,9 @@ public:
 
 	virtual const string get_id() { return peek ? "peek_char" : "get_char"; }
 
-	virtual bool is_not_pure(std::set<string>& work_set) {
-		work_set.insert(get_id());
-		return true;
+	virtual int is_not_pure(std::set<string>* work_set) {
+		work_set->insert(get_id());
+		return 1;
 	}
 
 	virtual generated_vars * generate_variants(context * CTX, frame_item * f, vector<value *> * & positional_vals) {
@@ -7065,9 +6731,9 @@ public:
 
 	virtual const string get_id() { return "at_end_of_stream"; }
 
-	virtual bool is_not_pure(std::set<string>& work_set) {
-		work_set.insert(get_id());
-		return true;
+	virtual int is_not_pure(std::set<string>* work_set) {
+		work_set->insert(get_id());
+		return 1;
 	}
 
 	virtual generated_vars * generate_variants(context * CTX, frame_item * f, vector<value *> * & positional_vals) {
@@ -7106,9 +6772,9 @@ public:
 
 	virtual const string get_id() { return "get_code"; }
 
-	virtual bool is_not_pure(std::set<string>& work_set) {
-		work_set.insert(get_id());
-		return true;
+	virtual int is_not_pure(std::set<string>* work_set) {
+		work_set->insert(get_id());
+		return 1;
 	}
 
 	virtual generated_vars * generate_variants(context * CTX, frame_item * f, vector<value *> * & positional_vals) {
@@ -7297,9 +6963,9 @@ public:
 
 	virtual const string get_id() { return "randomize"; }
 
-	virtual bool is_not_pure(std::set<string>& work_set) {
-		work_set.insert(get_id());
-		return true;
+	virtual int is_not_pure(std::set<string>* work_set) {
+		work_set->insert(get_id());
+		return 1;
 	}
 
 	virtual generated_vars * generate_variants(context * CTX, frame_item * f, vector<value *> * & positional_vals) {
@@ -7321,9 +6987,9 @@ public:
 	predicate_item_read_token_common(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) :
 		predicate_item(_neg, _once, _call, num, c, _prolog) { }
 
-	virtual bool is_not_pure(std::set<string>& work_set) {
-		work_set.insert(get_id());
-		return true;
+	virtual int is_not_pure(std::set<string>* work_set) {
+		work_set->insert(get_id());
+		return 1;
 	}
 
 	virtual generated_vars * get_token(context * CTX, frame_item * f, vector<value *> * & positional_vals, int arg_num, std::basic_istream<char> & ff) {
@@ -7609,7 +7275,7 @@ public:
 		return result;
 	}
 
-	virtual bool execute(context * CTX, frame_item* &f, int i, generated_vars* variants) {
+	virtual bool execute(context * CTX, frame_item* &f, int i, generated_vars* variants, long long & pseudo_duration) {
 		if (all) return true;
 
 		std::unique_lock<fastmux> lock(*CTX->DBLOCK);
@@ -7664,6 +7330,16 @@ public:
 
 	virtual const string get_id() { return "fork"; }
 
+	virtual void contextual_export(std::set<int> & end_points, string& result, string& offset, bool introduce_new_parallelism) {
+		if (transactable_facts)
+			result += "!";
+		if (locals_in_forked)
+			result += "*";
+		result += "{";
+		offset += "    ";
+		end_points.insert(ending_number);
+	}
+
 	virtual generated_vars* generate_variants(context * CTX, frame_item* f, vector<value*>*& positional_vals) {
 		if (positional_vals->size() != 0) {
 			std::cout << "fork branch incorrect call!" << endl;
@@ -7702,7 +7378,7 @@ public:
 		return ending_number == 0 ? NULL : parent->get_item(ending_number-1);
 	}
 
-	virtual bool execute(context * CTX, frame_item* &f, int i, generated_vars* variants) {
+	virtual bool execute(context * CTX, frame_item* &f, int i, generated_vars* variants, long long & pseudo_duration) {
 		int N = 1;
 		int_number* ni = NULL;
 
@@ -7747,11 +7423,11 @@ public:
 };
 
 class predicate_item_join : public predicate_item {
-	bool starred;
+	predicate_item * starred; // Generating predicate
 	value* k;
 	bool ending;
 public:
-	predicate_item_join(bool _starred, bool _ending, value * _k, bool _neg, bool _once, bool _call, int num, clause* c, interpreter* _prolog) :
+	predicate_item_join(predicate_item * _starred, bool _ending, value * _k, bool _neg, bool _once, bool _call, int num, clause* c, interpreter* _prolog) :
 		predicate_item(_neg, _once, _call, num, c, _prolog) {
 		starred = _starred;
 		ending = _ending;
@@ -7766,7 +7442,55 @@ public:
 
 	virtual void bind(bool starring) { }
 
-	virtual bool get_starred() { return starred; }
+	virtual bool is_terminal() { return ending; }
+
+	virtual void contextual_export(std::set<int>& end_points, string& result, string& offset, bool introduce_new_parallelism) {
+		if (is_terminal())
+			simple_export("true", result, offset, introduce_new_parallelism);
+		else {
+			if (starred) {
+				result.erase(result.length() - 4);
+				result += "}";
+				offset.erase(offset.length() - 4);
+			}
+			else {
+				int K = -1;
+				int_number* ni = NULL;
+				string output = "{";
+
+				var* nv = dynamic_cast<var*>(k);
+				if (nv) {
+					output += "=";
+					output += nv->export_str(false, false);
+				}
+				else {
+					ni = dynamic_cast<int_number*>(k);
+					if (ni == NULL) {
+						std::cout << "Number of &-joined threads must be a variable or int!" << endl;
+						exit(-3);
+					}
+					if (ni->get_value() >= 0)
+						K = (int)(0.5 + ni->get_value());
+					else
+						K = (int)(-0.5 + ni->get_value());
+					if (K < 0) {
+						output += "&";
+					}
+					else {
+						char buf[26];
+						output += "=";
+						output += __itoa(K, buf, 10);
+					}
+					output += "}";
+				}
+				simple_export(output, result, offset, introduce_new_parallelism);
+			}
+		}
+	}
+
+	virtual bool get_starred() { return starred != NULL; }
+
+	virtual predicate_item* get_star_forker() { return starred; }
 
 	virtual generated_vars* generate_variants(context * CTX, frame_item* f, vector<value*>*& positional_vals) {
 		if (positional_vals->size() != 0) {
@@ -7782,7 +7506,7 @@ public:
 		return result;
 	}
 
-	virtual bool execute(context * CTX, frame_item* &f, int i, generated_vars* variants) {
+	virtual bool execute(context * CTX, frame_item* &f, int i, generated_vars* variants, long long & pseudo_duration) {
 		if (this->conditional_star_mode && !this->is_starred)
 			return true;
 
@@ -7820,7 +7544,7 @@ public:
 
 			// Process
 			int dummy = 0;
-			return CTX->join(false, K, f, prolog, dummy, NULL);
+			return CTX->join(false, K, f, prolog, dummy, NULL, pseudo_duration, NULL);
 		}
 		else {
 			predicate_item* starting = CTX->SEQ_START.top();
@@ -7843,7 +7567,7 @@ public:
 				vector<frame_item*> rest;
 				size_t n = CTX->CONTEXTS.size();
 				frame_item* result = CTX->SEQ_RESULT.top()->copy(CTX);
-				if (CTX->join(true, -1, result, prolog, offset, &rest)) {
+				if (CTX->join(true, -1, result, prolog, offset, &rest, pseudo_duration, this)) {
 					size_t undo = n - offset;
 					_i -= (int)undo;
 					_variants->undo(_i, &rest);
@@ -7887,11 +7611,98 @@ public:
 		return result;
 	}
 
-	virtual bool execute(context* CTX, frame_item* &f, int i, generated_vars* variants) {
+	virtual bool execute(context* CTX, frame_item* &f, int i, generated_vars* variants, long long & pseudo_duration) {
 		if (CTX)
 			CTX->set_rollback(true);
 		// Process
 		return true;
+	}
+};
+
+class predicate_item_parallelize_level : public predicate_item {
+public:
+	predicate_item_parallelize_level(bool _neg, bool _once, bool _call, int num, clause* c, interpreter* _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) {}
+
+	virtual const string get_id() { return "parallelize_level"; }
+
+	virtual generated_vars* generate_variants(context* CTX, frame_item* f, vector<value*>*& positional_vals) {
+		if (positional_vals->size() != 1) {
+			std::cout << "parallelize_level(MinParallelizingTime) incorrect call!" << endl;
+			exit(-3);
+		}
+		generated_vars* result = NULL;
+		frame_item* ff = f->copy(CTX);
+		if (positional_vals->at(0)->defined()) {
+			int_number* a = dynamic_cast<int_number*>(positional_vals->at(0));
+			if (!a) {
+				std::cout << "parallelize_level(R): R is not an integer number!" << endl;
+				exit(-3);
+			}
+			result = new generated_vars();
+			result->push_back(ff);
+
+			prolog->VARLOCK.lock();
+			prolog->min_parallelizing_time = (long long)a->get_value();
+			prolog->VARLOCK.unlock();
+		}
+		else {
+			prolog->VARLOCK.lock();
+			long long n = prolog->min_parallelizing_time;
+			prolog->VARLOCK.unlock();
+			int_number* nn = new int_number(n);
+			if (positional_vals->at(0)->unify(CTX, ff, nn)) {
+				result = new generated_vars();
+				result->push_back(ff);
+			}
+			else
+				delete ff;
+			nn->free();
+		}
+
+		return result;
+	}
+};
+
+class predicate_item_optimize_load : public predicate_item {
+public:
+	predicate_item_optimize_load(bool _neg, bool _once, bool _call, int num, clause* c, interpreter* _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) {}
+
+	virtual const string get_id() { return "optimize_load"; }
+
+	virtual generated_vars* generate_variants(context* CTX, frame_item* f, vector<value*>*& positional_vals) {
+		if (positional_vals->size() != 1) {
+			std::cout << "optimize_load(on/off) incorrect call!" << endl;
+			exit(-3);
+		}
+		generated_vars* result = NULL;
+		frame_item* ff = f->copy(CTX);
+		if (positional_vals->at(0)->defined()) {
+			term* a = dynamic_cast<term*>(positional_vals->at(0));
+			if (!a || (a->get_name() != "on" && a->get_name() != "off")) {
+				std::cout << "optimize_load(R): R is not on/off!" << endl;
+				exit(-3);
+			}
+			result = new generated_vars();
+			result->push_back(ff);
+
+			prolog->VARLOCK.lock();
+			prolog->load_optimized = a->get_name() == "on";
+			prolog->VARLOCK.unlock();
+		}
+		else {
+			prolog->VARLOCK.lock();
+			term * s = new term(prolog->load_optimized ? "on" : "off");
+			prolog->VARLOCK.unlock();
+			if (positional_vals->at(0)->unify(CTX, ff, s)) {
+				result = new generated_vars();
+				result->push_back(ff);
+			}
+			else
+				delete ff;
+			s->free();
+		}
+
+		return result;
 	}
 };
 
@@ -8298,7 +8109,8 @@ bool interpreter::retrieve(context * CTX, frame_item * ff, predicate_item * curr
 	return result;
 }
 
-bool interpreter::process(context * CONTEXT, bool neg, clause * this_clause, predicate_item * p, frame_item * f, vector<value *> ** positional_vals) {
+bool interpreter::process(context * CONTEXT, bool neg, clause * this_clause, predicate_item * p,
+		frame_item * f, vector<value *> ** positional_vals) {
 	predicate_item_user * user = dynamic_cast<predicate_item_user *>(p);
 
 	predicate* user_p = user ? user->get_user_predicate() : NULL;
@@ -8316,6 +8128,9 @@ bool interpreter::process(context * CONTEXT, bool neg, clause * this_clause, pre
 		CONTEXT->SEQ_END.push(p->get_parent()->get_item(p->get_starred_end()));
 	}
 
+	predicate* pp = this_clause ? this_clause->get_predicate() : NULL;
+	if (pp) pp->mark_runned();
+
 	auto seqDone = [&]() {
 		if (p && p->get_starred_end() >= 0) {
 			delete CONTEXT->SEQ_RESULT.top();
@@ -8323,6 +8138,129 @@ bool interpreter::process(context * CONTEXT, bool neg, clause * this_clause, pre
 			CONTEXT->GENERATORS.pop();
 			CONTEXT->SEQ_START.pop();
 			CONTEXT->SEQ_END.pop();
+		}
+	};
+
+	auto denyParallelBeforeFrontier = [&]() {
+		if (min_parallelizing_time >= 0 && p) {
+			if (!p->get_parent()->is_not_pure()) {
+				int level = CNT->LEVELS.top();
+				int previous = (int)CNT->START_CLAUSES.size() - 1;
+				int fork_level = 0;
+				while (previous >= 0 && CNT->LEVELS[previous] >= level && fork_level >= 0) {
+					if (CNT->TRACERS[previous]) {
+						if (dynamic_cast<predicate_item_join*>(CNT->TRACERS[previous]) && (!((predicate_item_join *)(CNT->TRACERS[previous]))->is_terminal()) ||
+							(CNT->TRACERS[previous]->get_parallelizing_status() & PAR_SEQ_JOIN_AFTER)
+							) fork_level++;
+					}
+					if (CNT->START_CLAUSES[previous] == this_clause && fork_level == 0) {
+						if (CNT->LEVELS[previous] == level) {
+							CNT->START_CLAUSES[previous] = NULL;
+							if (CNT->TRACERS[previous] && CNT->TRACERS[previous]->is_first())
+								break;
+						}
+					}
+					if (CNT->TRACERS[previous]) {
+						if (CNT->TRACERS[previous]->get_strict_starred_end() >= 0 ||
+							(CNT->TRACERS[previous]->get_parallelizing_status() & PAR_SEQ)
+							)
+							if (fork_level > 0)
+								fork_level--;
+					}
+					previous--;
+				}
+			}
+		}
+	};
+
+	auto analyzeParallel = [&](predicate_item * failing) {
+		if (min_parallelizing_time >= 0 && failing && !(failing->get_parallelizing_status() & PAR_SEQ_JOIN_AFTER)) {
+			if (failing->get_parent()->is_not_pure() <= 0) {
+				int level = CNT->LEVELS.top();
+				int previous = (int)CNT->START_CLAUSES.size() - 1;
+				int best = -1;
+				int fork_level = 0;
+				int bracket_level = 0;
+				while (previous >= 0 && bracket_level >= 0) {
+					while (previous >= 0 && bracket_level >= 0 &&
+						(!CNT->START_CLAUSES[previous] || CNT->START_CLAUSES[previous]->get_predicate() != this_clause->get_predicate()) &&
+						CNT->LEVELS[previous] > level &&
+						(
+							CNT->ptrTRACE[previous] == 0 ||
+							dynamic_cast<predicate_left_bracket*>(CNT->TRACERS[previous]) ||
+							!CNT->TRACERS[previous] ||
+							(dynamic_cast<predicate_item_user*>(CNT->TRACERS[previous]) && !((predicate_item_user*)CNT->TRACERS[previous])->is_dynamic()) ||
+							CNT->TRACERS[previous]->get_strict_starred_end() >= 0 ||
+							(CNT->TRACERS[previous]->get_parallelizing_status() & PAR_SEQ) ||
+							CNT->START_TIMES[previous] + min_parallelizing_time > CNT->pseudo_time
+							)
+						) {
+						if (CNT->TRACERS[previous]) {
+							if (dynamic_cast<predicate_right_bracket*>(CNT->TRACERS[previous]))
+								bracket_level++;
+							else if (dynamic_cast<predicate_left_bracket*>(CNT->TRACERS[previous]))
+								bracket_level--;
+							if (dynamic_cast<predicate_item_join*>(CNT->TRACERS[previous]) && (!((predicate_item_join*)(CNT->TRACERS[previous]))->is_terminal()) ||
+								(CNT->TRACERS[previous]->get_parallelizing_status() & PAR_SEQ_JOIN_AFTER)
+								) fork_level++;
+							if (CNT->TRACERS[previous]->get_strict_starred_end() >= 0 ||
+								(CNT->TRACERS[previous]->get_parallelizing_status() & PAR_SEQ)
+								)
+								if (fork_level > 0)
+									fork_level--;
+						}
+						previous--;
+					}
+					if (previous >= 0 && bracket_level >= 0) {
+						if (CNT->LEVELS[previous] < level)
+							break;
+						if (CNT->LEVELS[previous] == level && CNT->START_CLAUSES[previous] != this_clause)
+							break;
+						if (CNT->TRACERS[previous]) {
+							if (dynamic_cast<predicate_item_join*>(CNT->TRACERS[previous]) && (!((predicate_item_join*)(CNT->TRACERS[previous]))->is_terminal()) ||
+								(CNT->TRACERS[previous]->get_parallelizing_status() & PAR_SEQ_JOIN_AFTER)
+								) fork_level++;
+						}
+						if (CNT->START_CLAUSES[previous] && fork_level == 0 && bracket_level == 0)
+							if (CNT->START_CLAUSES[previous] == this_clause) {
+								if (CNT->LEVELS[previous] == level) {
+									if (
+										CNT->ptrTRACE[previous] != 0 &&
+										CNT->TRACERS[previous] &&
+										!dynamic_cast<predicate_left_bracket*>(CNT->TRACERS[previous]) &&
+										!CNT->TRACERS[previous]->is_call() &&
+										!CNT->TRACERS[previous]->is_once() &&
+										!(dynamic_cast<predicate_item_user*>(CNT->TRACERS[previous]) && !((predicate_item_user*)CNT->TRACERS[previous])->is_dynamic()) &&
+										CNT->TRACERS[previous]->get_strict_starred_end() < 0 &&
+										!(CNT->TRACERS[previous]->get_parallelizing_status() & PAR_SEQ) &&
+										CNT->START_TIMES[previous] + min_parallelizing_time <= CNT->pseudo_time
+										) {
+										if (CNT->TRACERS[previous]->get_self_number() < failing->get_self_number())
+											best = previous;
+										else
+											break;
+									}
+								}
+							}
+						if (CNT->TRACERS[previous]) {
+							if (CNT->TRACERS[previous]->get_strict_starred_end() >= 0 ||
+								(CNT->TRACERS[previous]->get_parallelizing_status() & PAR_SEQ)
+								)
+								if (fork_level > 0)
+									fork_level--;
+						}
+						if (dynamic_cast<predicate_right_bracket*>(CNT->TRACERS[previous]))
+							bracket_level++;
+						else if (dynamic_cast<predicate_left_bracket*>(CNT->TRACERS[previous]))
+							bracket_level--;
+						previous--;
+					}
+				}
+				if (best >= 0) {
+					CNT->TRACERS[best]->include_parallelizing_status(PAR_SEQ);
+					failing->include_parallelizing_status(PAR_SEQ_JOIN_AFTER);
+				}
+			}
 		}
 	};
 
@@ -8337,6 +8275,15 @@ bool interpreter::process(context * CONTEXT, bool neg, clause * this_clause, pre
 		cout << ")" << endl;
 	}
 	*/
+
+	CNT->FLAGS.push_back((p&& p->is_once() ? ::once_flag : 0) + (p && p->is_call() ? call_flag : 0));
+	CNT->LEVELS.push((int)CNT->PARENT_CALLS.size());
+	CNT->TRACE.push(variants);
+	CNT->START_TIMES.push(CNT->pseudo_time);
+	CNT->START_CLAUSES.push(this_clause);
+	CNT->TRACEARGS.push(positional_vals);
+	CNT->TRACERS.push(p);
+
 	bool neg_standard = !(user && !user->is_dynamic()) && p && p->is_negated();
 	int i = 0;
 	if (variants || neg_standard) {
@@ -8344,12 +8291,6 @@ bool interpreter::process(context * CONTEXT, bool neg, clause * this_clause, pre
 			cout << "process: NULL context?!" << endl;
 			exit(1257);
 		}
-		CNT->FLAGS.push_back((p && p->is_once() ? ::once_flag : 0) + (p && p->is_call() ? call_flag : 0));
-		CNT->LEVELS.push((int)CNT->PARENT_CALLS.size());
-		CNT->TRACE.push(variants);
-		CNT->TRACEARGS.push(positional_vals);
-		CNT->TRACERS.push(p);
-
 		predicate_right_bracket* rb = dynamic_cast<predicate_right_bracket*>(p);
 		predicate_left_bracket* lb = dynamic_cast<predicate_left_bracket*>(p);
 
@@ -8372,6 +8313,8 @@ bool interpreter::process(context * CONTEXT, bool neg, clause * this_clause, pre
 				if (!user->is_negated()) {
 					if (user->processing(CNT, neg, CNT->ptrTRACE.top(), variants, positional_vals, ff, CONTEXT)) {
 						CNT->TRACE.pop();
+						CNT->START_TIMES.pop();
+						CNT->START_CLAUSES.pop();
 						CNT->TRACEARGS.pop();
 						CNT->TRACERS.pop();
 						CNT->FLAGS.pop_back();
@@ -8394,11 +8337,15 @@ bool interpreter::process(context * CONTEXT, bool neg, clause * this_clause, pre
 						return true;
 					}
 					else if (!variants || !variants->has_variant(CNT->ptrTRACE.top()+1)) {
+						analyzeParallel(p);
+
 						bool result = false;
 
 						CNT->FLAGS.pop_back();
 						CNT->LEVELS.pop();
 						CNT->TRACE.pop();
+						CNT->START_TIMES.pop();
+						CNT->START_CLAUSES.pop();
 						CNT->TRACEARGS.pop();
 						CNT->TRACERS.pop();
 
@@ -8424,7 +8371,11 @@ bool interpreter::process(context * CONTEXT, bool neg, clause * this_clause, pre
 				}
 				else {
 					if (user->processing(CNT, neg, CNT->ptrTRACE.top(), variants, positional_vals, ff, CONTEXT)) {
+						analyzeParallel(p);
+
 						CNT->TRACE.pop();
+						CNT->START_TIMES.pop();
+						CNT->START_CLAUSES.pop();
 						CNT->TRACEARGS.pop();
 						CNT->TRACERS.pop();
 						CNT->FLAGS.pop_back();
@@ -8454,13 +8405,20 @@ bool interpreter::process(context * CONTEXT, bool neg, clause * this_clause, pre
 				}
 			}
 			else {
+				long long pseudo_duration = 1;
 				if (neg_standard) {
-					if (variants && variants->had_variants() && (!p || p->execute(CNT, ff, CNT->ptrTRACE.top(), variants))) {
+					if (variants && variants->had_variants() && (!p || p->execute(CNT, ff, CNT->ptrTRACE.top(), variants, pseudo_duration))) {
+						analyzeParallel(p);
+
 						CNT->TRACE.pop();
+						CNT->START_TIMES.pop();
+						CNT->START_CLAUSES.pop();
 						CNT->TRACEARGS.pop();
 						CNT->TRACERS.pop();
 						CNT->FLAGS.pop_back();
 						CNT->LEVELS.pop();
+
+						CNT->pseudo_time += pseudo_duration;
 
 						if (f && ff)
 							f->sync(false, false, CNT, ff);
@@ -8485,11 +8443,15 @@ bool interpreter::process(context * CONTEXT, bool neg, clause * this_clause, pre
 					}
 					neg_standard = false;
 				}
-				success = !p || p->execute(CNT, ff, CNT->ptrTRACE.top(), variants);
+				success = !p || p->execute(CNT, ff, CNT->ptrTRACE.top(), variants, pseudo_duration);
+				CNT->pseudo_time += pseudo_duration;
 			}
 
 			if (success) {
 				bool yes = next == NULL;
+
+				if (dynamic_cast<predicate_or*>(p))
+					denyParallelBeforeFrontier();
 
 				bool rbc = rb && rb->get_corresponding()->is_call();
 				bool rbo = rb && rb->get_corresponding()->is_once();
@@ -8527,6 +8489,8 @@ bool interpreter::process(context * CONTEXT, bool neg, clause * this_clause, pre
 						}
 						if (yes) {
 							CNT->TRACE.pop();
+							CNT->START_TIMES.pop();
+							CNT->START_CLAUSES.pop();
 							CNT->TRACEARGS.pop();
 							CNT->TRACERS.pop();
 							CNT->FLAGS.pop_back();
@@ -8571,6 +8535,8 @@ bool interpreter::process(context * CONTEXT, bool neg, clause * this_clause, pre
 				}
 				else {
 					// f->sync(ff);
+
+					denyParallelBeforeFrontier();
 
 					predicate_item * next_clause_call = NULL;
 					predicate_item * parent_call = NULL;
@@ -8617,6 +8583,8 @@ bool interpreter::process(context * CONTEXT, bool neg, clause * this_clause, pre
 
 						if (neg) {
 							CNT->TRACE.pop();
+							CNT->START_TIMES.pop();
+							CNT->START_CLAUSES.pop();
 							CNT->TRACEARGS.pop();
 							CNT->TRACERS.pop();
 							CNT->FLAGS.pop_back();
@@ -8684,6 +8652,8 @@ bool interpreter::process(context * CONTEXT, bool neg, clause * this_clause, pre
 							}
 							if (yes) {
 								CNT->TRACE.pop();
+								CNT->START_TIMES.pop();
+								CNT->START_CLAUSES.pop();
 								CNT->TRACEARGS.pop();
 								CNT->TRACERS.pop();
 								CNT->FLAGS.pop_back();
@@ -8713,6 +8683,8 @@ bool interpreter::process(context * CONTEXT, bool neg, clause * this_clause, pre
 					}
 					else {
 						CNT->TRACE.pop();
+						CNT->START_TIMES.pop();
+						CNT->START_CLAUSES.pop();
 						CNT->TRACEARGS.pop();
 						CNT->TRACERS.pop();
 						CNT->FLAGS.pop_back();
@@ -8754,6 +8726,10 @@ bool interpreter::process(context * CONTEXT, bool neg, clause * this_clause, pre
 			}
 
 			i = CNT->ptrTRACE.top();
+
+			if (!neg_standard && !(variants && variants->has_variant(i+1))) // if this is a last variant
+				analyzeParallel(p);
+
 			CNT->ptrTRACE.pop();
 			if (f && ff)
 				f->sync(false, false, CNT, ff);
@@ -8761,12 +8737,20 @@ bool interpreter::process(context * CONTEXT, bool neg, clause * this_clause, pre
 		}
 		if (lb) lb->leave_critical();
 		if (rb) rb->get_corresponding()->enter_critical();
-		CNT->FLAGS.pop_back();
-		CNT->LEVELS.pop();
-		CNT->TRACE.pop();
-		CNT->TRACEARGS.pop();
-		CNT->TRACERS.pop();
 	}
+	else {
+		CNT->ptrTRACE.push(0);
+		analyzeParallel(p);
+		CNT->ptrTRACE.pop();
+	}
+
+	CNT->FLAGS.pop_back();
+	CNT->LEVELS.pop();
+	CNT->TRACE.pop();
+	CNT->START_TIMES.pop();
+	CNT->START_CLAUSES.pop();
+	CNT->TRACEARGS.pop();
+	CNT->TRACERS.pop();
 
 	if (variants)
 		variants->delete_from(i);
@@ -8780,7 +8764,7 @@ bool interpreter::process(context * CONTEXT, bool neg, clause * this_clause, pre
 	return false;
 }
 
-void interpreter::parse_clause(context * CTX, vector<string> & renew, frame_item * ff, string & s, size_t & p) {
+string interpreter::parse_clause(context * CTX, vector<string> & renew, frame_item * ff, string & s, size_t & p, bool optimized) {
 	stack<predicate_left_bracket *> brackets;
 	stack< stack<predicate_or *> > ors;
 	stack<int> or_levels;
@@ -8788,6 +8772,8 @@ void interpreter::parse_clause(context * CTX, vector<string> & renew, frame_item
 	int bracket_level = 0;
 	stack<int> fork_bracket_levels;
 	bool or_branch = false;
+
+	string result = "";
 
 	bypass_spaces(s, p);
 
@@ -8817,7 +8803,7 @@ void interpreter::parse_clause(context * CTX, vector<string> & renew, frame_item
 					exit(22);
 				}
 				s.insert(p, body);
-				return;
+				return result;
 			}
 			else {
 				std::cout << s.substr(p, 20) << " : can't open including file!" << endl;
@@ -8836,6 +8822,8 @@ void interpreter::parse_clause(context * CTX, vector<string> & renew, frame_item
 		std::cout << s.substr(p,10) << " : strange clause head!" << endl;
 		exit(2);
 	}
+
+	result = id;
 
 	predicate * pr = PREDICATES[id];
 
@@ -8908,6 +8896,8 @@ void interpreter::parse_clause(context * CTX, vector<string> & renew, frame_item
 			bool star = false;
 			bool starred = false;
 			bool conditional_starred = false;
+			int star_good_tries = 0;
+			int star_bad_tries  = 0;
 			bool locals_in_forked = false;
 			bool transactable_facts = false;
 			std::recursive_mutex * starlock = &STARLOCK;
@@ -8949,7 +8939,8 @@ void interpreter::parse_clause(context * CTX, vector<string> & renew, frame_item
 				} else if (s[p] == '{')
 					locals_in_forked = true;
 			}
-			else if ((p + 1) < s.length() && s[p] == '*' && (isalpha(s[p + 1]) || s[p+1] == '?' && (p + 2) < s.length() && isalpha(s[p+2]))) {
+			else if ((p + 1) < s.length() && s[p] == '*' && (isalpha(s[p + 1]) || s[p+1] == '?' && (p + 2) < s.length() &&
+																									(isalpha(s[p+2]) || s[p+2] == '+' || s[p+2] == '-'))) {
 				cl->set_forking(true);
 				pr->set_forking(true);
 				atomizer.set_forking(true);
@@ -8957,9 +8948,18 @@ void interpreter::parse_clause(context * CTX, vector<string> & renew, frame_item
 				starred = true;
 				if (s[p + 1] == '?') {
 					conditional_starred = true;
-					p++;
+					p += 2;
+					while (p < s.length() && s[p] == '+') {
+						star_good_tries++;
+						p++;
+					}
+					while (p < s.length() && s[p] == '-') {
+						star_bad_tries++;
+						p++;
+					}
 				}
-				p++;
+				else
+					p++;
 			}
 
 			if ((p + 1) < s.length() && s[p] == '\\' && s[p + 1] == '+') {
@@ -8987,7 +8987,7 @@ void interpreter::parse_clause(context * CTX, vector<string> & renew, frame_item
 							p++;
 							if (!v)
 								v = new int_number(1);
-							pi = new predicate_item_join(false, false, v, false, false, false, num, cl, this);
+							pi = new predicate_item_join(NULL, false, v, false, false, false, num, cl, this);
 						}
 						else {
 							std::cout << "'}' expected after '{=' or '{=N' [" << s.substr((size_t)(p - 30), 100) << "]!" << endl;
@@ -8999,7 +8999,7 @@ void interpreter::parse_clause(context * CTX, vector<string> & renew, frame_item
 						if (p < s.length() && s[p] == '}') {
 							p++;
 							// {&}
-							pi = new predicate_item_join(false, false, new int_number(-1), false, false, false, num, cl, this);
+							pi = new predicate_item_join(NULL, false, new int_number(-1), false, false, false, num, cl, this);
 						} else {
 							std::cout << "Clause [" << s.substr((size_t)(p - 30), 100) << "] : premature end of file!" << endl;
 							exit(2);
@@ -9015,7 +9015,7 @@ void interpreter::parse_clause(context * CTX, vector<string> & renew, frame_item
 						atomizer.set_forking(true);
 						forking = true;
 						bypass_spaces(s, p);
-						s.insert(s.begin() + p, 1, '(');
+						if (!optimized) s.insert(s.begin() + p, 1, '(');
 					}
 				}
 				else {
@@ -9024,7 +9024,7 @@ void interpreter::parse_clause(context * CTX, vector<string> & renew, frame_item
 				}
 			}
 			else if (p < s.length() && s[p] == '}')
-				if (bracket_inserted) {
+				if (optimized || bracket_inserted) {
 					bracket_inserted = false;
 					p++;
 					// }
@@ -9054,7 +9054,7 @@ void interpreter::parse_clause(context * CTX, vector<string> & renew, frame_item
 						}
 						if (p < s.length() && s[p] == '}') {
 							// Do not p++
-							pi = new predicate_item_join(false, true, new int_number(-1), false, false, false, num, cl, this);
+							pi = new predicate_item_join(NULL, false, new int_number(-1), false, false, false, num, cl, this);
 						}
 						bypass_spaces(s, p);
 						if (p < s.length() && s[p] == '{')
@@ -9064,8 +9064,8 @@ void interpreter::parse_clause(context * CTX, vector<string> & renew, frame_item
 						predicate_item* last = fork_stack.top();
 						last->set_starred_end(num);
 
-						pi = new predicate_item_join(true, true, new int_number(-1), false, false, false, num, cl, this);
-						pi->set_conditional_star_mode(last->get_conditional_star_mode());
+						pi = new predicate_item_join(last, false, new int_number(-1), false, false, false, num, cl, this);
+						pi->set_conditional_star_mode(last->get_conditional_star_mode(), last->get_good_tries(), last->get_bad_tries());
 					}
 					fork_stack.pop();
 					fork_bracket_levels.pop();
@@ -9567,6 +9567,12 @@ void interpreter::parse_clause(context * CTX, vector<string> & renew, frame_item
 							else if (_iid == id_rollback) {
 								pi = new predicate_item_rollback(neg, once, call, num, cl, this);
 							}
+							else if (_iid == id_optimize_load) {
+								pi = new predicate_item_optimize_load(neg, once, call, num, cl, this);
+								}
+							else if (_iid == id_parallelize_level) {
+									pi = new predicate_item_parallelize_level(neg, once, call, num, cl, this);
+									}
 							else {
 								cout << "Unmapped construction : " << iid << "!" << endl;
 								exit(1730);
@@ -9575,7 +9581,7 @@ void interpreter::parse_clause(context * CTX, vector<string> & renew, frame_item
 						if (starred) {
 							fork_stack.push(pi);
 							fork_bracket_levels.push(bracket_level);
-							pi->set_conditional_star_mode(conditional_starred);
+							pi->set_conditional_star_mode(conditional_starred, star_good_tries, star_bad_tries);
 						}
 					}
 
@@ -9634,7 +9640,7 @@ void interpreter::parse_clause(context * CTX, vector<string> & renew, frame_item
 				if (!open_bracket && s[p] == '{') {
 					if (starred) {
 						p++;
-						s.insert(s.begin() + p, 1, '(');
+						if (!optimized) s.insert(s.begin() + p, 1, '(');
 					}
 					else {
 						std::cout << "'*Predicate(...){...}' expected in " << id << " clause [" << s.substr((size_t)(p - 10), 100) << "]" << endl;
@@ -9646,7 +9652,7 @@ void interpreter::parse_clause(context * CTX, vector<string> & renew, frame_item
 					p++;
 					if (brackets.size() == 0) {
 						if (cl->is_forking()) {
-							pi = new predicate_item_join(false, true, new int_number(-1), false, false, false, num++, cl, this);
+							pi = new predicate_item_join(NULL, false, new int_number(-1), false, false, false, num++, cl, this);
 							cl->add_item(pi);
 						}
 						clause * _cl = new clause(pr);
@@ -9685,7 +9691,7 @@ void interpreter::parse_clause(context * CTX, vector<string> & renew, frame_item
 					p++;
 
 					if (cl->is_forking()) {
-						pi = new predicate_item_join(false, true, new int_number(-1), false, false, false, num++, cl, this);
+						pi = new predicate_item_join(NULL, true, new int_number(-1), false, false, false, num++, cl, this);
 						cl->add_item(pi);
 					}
 
@@ -9730,15 +9736,21 @@ void interpreter::parse_clause(context * CTX, vector<string> & renew, frame_item
 			}
 		} while (true);
 	}
+
+	return result;
 }
 
-void interpreter::parse_program(vector<string> & renew, string & s) {
+void interpreter::parse_program(vector<string> & renew, string & s, std::set<string> * loaded_predicates, bool optimized) {
 	size_t p = 0;
+	if (loaded_predicates)
+		loaded_predicates->clear();
 	do {
 		bypass_spaces(s, p);
 		if (p < s.length()) {
 			frame_item * dummy = new frame_item();
-			parse_clause(CONTEXT, renew, dummy, s, p);
+			string id = parse_clause(CONTEXT, renew, dummy, s, p, optimized);
+			if (loaded_predicates)
+				loaded_predicates->insert(id);
 			delete dummy;
 		}
 		else
@@ -9747,27 +9759,101 @@ void interpreter::parse_program(vector<string> & renew, string & s) {
 }
 
 void interpreter::add_std_body(string & body) {
-	std::ifstream in(std_lib_pro);
-	if (in) {
-		char buf[65536];
-		while (!in.eof()) {
-			in.getline(buf, sizeof(buf));
-			body.append(buf);
-			body.append("\n");
+	if (!std_body_added) {
+		std::ifstream in(std_lib_pro);
+		if (in) {
+			char buf[65536];
+			while (!in.eof()) {
+				in.getline(buf, sizeof(buf));
+				body.append(buf);
+				body.append("\n");
+			}
+			in.close();
 		}
-		in.close();
+		body.append("subtract([],_,[]).");
+		body.append("\n");
+		body.append("subtract([H|T],L1,L2):-once(member(H,L1)), once(subtract(T,L1,L2)).");
+		body.append("\n");
+		body.append("subtract([H|T],L1,[H|L2]):-\\+ member(H,L1), once(subtract(T,L1,L2)).");
+		body.append("\n");
+
+		std_body_added = true;
 	}
-	body.append("subtract([],_,[]).");
-	body.append("\n");
-	body.append("subtract([H|T],L1,L2):-once(member(H,L1)), once(subtract(T,L1,L2)).");
-	body.append("\n");
-	body.append("subtract([H|T],L1,[H|L2]):-\\+ member(H,L1), once(subtract(T,L1,L2)).");
-	body.append("\n");
+}
+
+void interpreter::writeOptimized() {
+	if (min_parallelizing_time >= 0) {
+		map<std::string, std::set<std::string>*>::iterator it = consulted.begin();
+		while (it != consulted.end()) {
+			bool runned = false;
+			for (const std::string& s : *it->second)
+				if (PREDICATES[s]->is_runned()) {
+					runned = true;
+					break;
+				}
+			if (runned) {
+				ofstream fff(it->first + ".optimized");
+				fff << "% " << consulted_cs[it->first] << endl;
+				fff << export_str(true, it->second);
+				fff.close();
+			}
+			it++;
+		}
+	}
+}
+
+long long interpreter::calculate_check_sum(ifstream& in) {
+	in.seekg(0, ios::end);
+	std::streamoff n = in.tellg();
+	in.seekg(0, ios::beg);
+	unsigned char* buf = new unsigned char[n];
+	in.read((char *)buf, n);
+	long long result = 0;
+	for (long long i = 0; i < n; i++) {
+		result ^= ((long long)buf[i]) << (i % 47);
+	}
+	delete[] buf;
+	return result;
 }
 
 void interpreter::consult(const string & fname, bool renew) {
 	string body;
-	std::ifstream in(fname);
+
+	string _fname = fname;
+
+	ifstream in(fname, ios::binary);
+	consulted_cs[fname] = -1;
+	if (in) {
+		consulted_cs[fname] = calculate_check_sum(in);
+		in.close();
+	}
+
+	bool optimized = false;
+	if (load_optimized && boost::filesystem::exists(fname) && boost::filesystem::exists(fname + ".optimized")) {
+		std::time_t srct = boost::filesystem::creation_time(fname);
+		std::time_t optt = boost::filesystem::creation_time(fname + ".optimized");
+		if (optt >= srct) {
+			ifstream inopt(fname + ".optimized");
+			string percent;
+			long long csopt;
+			inopt >> percent >> csopt;
+			inopt.close();
+			if (percent == "%") {
+				if (csopt == consulted_cs[fname]) {
+					_fname = fname + ".optimized";
+					optimized = true;
+				}
+			}
+		}
+	}
+
+	in.open(_fname);
+
+	map<string, std::set<string>*>::iterator itc = consulted.find(fname);
+	if (itc == consulted.end()) {
+		consulted[fname] = new std::set<string>();
+		itc = consulted.find(fname);
+	}
 
 	if (in) {
 		string line;
@@ -9788,7 +9874,7 @@ void interpreter::consult(const string & fname, bool renew) {
 		}
 	}
 
-	parse_program(_renew, body);
+	parse_program(_renew, body, itc->second, optimized);
 	bind();
 }
 
@@ -9891,6 +9977,11 @@ interpreter::~interpreter() {
 		delete iti->second;
 		iti++;
 	}
+	map< string, set<string>*>::iterator itc = consulted.begin();
+	while (itc != consulted.end()) {
+		delete itc->second;
+		itc++;
+	}
 	delete THREAD_POOL;
 }
 
@@ -9984,6 +10075,604 @@ bool interpreter::check_consistency(set<string> & dynamic_prefixes) {
 	return result;
 }
 
+bool context::join(bool sequential_mode, int K, frame_item* f, interpreter* INTRP, int& sequential, vector<frame_item*>* rest, long long& pseudo_duration, predicate_item * starred) {
+	std::unique_lock<fastmux> lock(pages_mutex);
+	if (CONTEXTS.size() == 0) {
+		lock.unlock();
+		return true;
+	}
+
+	context* C = this;
+	while (C && !C->THR)
+		C = C->parent;
+	bool forked = C && C->THR;
+
+	CONTEXTS.push_back(this);
+
+	sequential = sequential_mode ? 0 : -1;
+
+	int joined = 0;
+	int success = 0;
+	bool stopped_by_true = false;
+	vector<bool> joineds(CONTEXTS.size(), false);
+	std::set<unsigned long long> names;
+	vector<std::set<unsigned long long>> lnames(CONTEXTS.size(), std::set<unsigned long long>());
+
+	long long pseudo_costs = 1;
+
+	f->add_local_names(false, lnames[CONTEXTS.size() - 1]);
+
+	names = lnames[CONTEXTS.size() - 1];
+
+	int tries = 0;
+
+	do {
+		vector<bool> stoppeds(CONTEXTS.size(), false);
+		vector<bool> rollback(CONTEXTS.size(), false);
+		int stopped = (int)std::count(joineds.begin(), joineds.end(), true);
+		bool mainlined = !joineds[CONTEXTS.size() - 1];
+		if (mainlined) {
+			stoppeds[CONTEXTS.size() - 1] = true;
+			stopped++;
+		}
+		f->register_facts(false, this, lnames[CONTEXTS.size() - 1]);
+		names.insert(lnames[CONTEXTS.size() - 1].begin(), lnames[CONTEXTS.size() - 1].end());
+		while (stopped < CONTEXTS.size()) {
+			for (int i = 0; i < CONTEXTS.size(); i++)
+				if (!joineds[i] && !stoppeds[i] && !rollback[i]) {
+					{
+						std::unique_lock<fastmux> lk(CONTEXTS[i]->THR->get_finished_mutex());
+						while (!CONTEXTS[i]->THR->is_stopped())
+							CONTEXTS[i]->THR->get_finished_var().wait(lk);
+					}
+					rollback[i] = CONTEXTS[i]->rollback;
+					stoppeds[i] = !rollback[i];
+					if (stoppeds[i]) {
+						CONTEXTS[i]->FRAME.load()->add_local_names(CONTEXTS[i]->locals_in_forked, lnames[i]);
+						if (CONTEXTS[i]->transactable_facts)
+							CONTEXTS[i]->FRAME.load()->register_facts(false, CONTEXTS[i], lnames[i]);
+						names.insert(lnames[i].begin(), lnames[i].end());
+					}
+					stopped++;
+				}
+		}
+		stopped -= (int)std::count(rollback.begin(), rollback.end(), true);
+
+		pseudo_costs += eli;
+
+		// In not joineds search for winners
+		vector<vector<int>> M(CONTEXTS.size(), vector<int>(CONTEXTS.size(), 0));
+		std::set<unsigned long long> conflictors;
+		for (const unsigned long long vname : names) {
+			// Conflict Matrix
+			for (int i = 0; i < CONTEXTS.size() - 2; i++)
+				for (int j = i + 1; j < CONTEXTS.size() - 1; j++)
+					if (stoppeds[i] && stoppeds[j] && (lnames[i].find(vname) != lnames[i].end() && lnames[j].find(vname) != lnames[j].end())) {
+						clock_rdtsc cri, fwi, fri, lwi, lri;
+						CONTEXTS[i]->FRAME.load()->statistics(vname, cri, fwi, fri, lwi, lri);
+						clock_rdtsc crj = 0, fwj = 0, frj = 0, lwj = 0, lrj = 0;
+						if (j == CONTEXTS.size() - 1 && dynamic_cast<tframe_item*>(f) == NULL)
+							/* M[i][j]++ */;
+						else {
+							if (j == CONTEXTS.size() - 1)
+								dynamic_cast<tframe_item*>(f)->statistics(vname, crj, fwj, frj, lwj, lrj);
+							else
+								CONTEXTS[j]->FRAME.load()->statistics(vname, crj, fwj, frj, lwj, lrj);
+							if (fwi || fwj) {
+								if (fwi && fwj) {
+									if (fri && fri <= fwi || frj && frj <= fwj) {
+										M[i][j]++;
+										conflictors.insert(vname);
+									}
+								}
+								else if (fwi) {
+									if ((lwi >= crj) && lrj) {
+										M[i][j]++;
+										conflictors.insert(vname);
+									}
+								}
+								else {
+									if ((lwj >= cri) && lri) {
+										M[i][j]++;
+										conflictors.insert(vname);
+									}
+								}
+							}
+						}
+					}
+		}
+		bool changed;
+		do {
+			changed = false;
+			for (int i = 0; i < CONTEXTS.size(); i++)
+				for (int j = i + 1; j < CONTEXTS.size(); j++)
+					if (M[i][j])
+						for (int k = j + 1; k < CONTEXTS.size(); k++)
+							if (M[j][k] && M[i][k] == 0) {
+								M[i][k] = 1;
+								changed = true;
+							}
+		} while (changed);
+		// Decide
+		int first_winner = mainlined ? (int)(CONTEXTS.size() - 1) : -1;
+		std::map<double, int> other_winners; // key = fw+0.1*id, val = number of thread
+		int first = first_winner < 0 ? 0 : first_winner;
+		int last = first_winner < 0 ? (int)(CONTEXTS.size() - 1) : first_winner;
+
+		std::map<int, double> keys;
+
+		auto get_key = [&](int i)->double {
+			if (stoppeds[i] && CONTEXTS[i]->FRAME.load()) {
+				clock_rdtsc min_time = 0;
+				if (conflictors.size())
+					for (const unsigned long long vname : conflictors /* names */) {
+						if (lnames[i].find(vname) != lnames[i].end()) {
+							clock_rdtsc cr, fw, fr, lw, lr;
+							CONTEXTS[i]->FRAME.load()->statistics(vname, cr, fw, fr, lw, lr);
+							if (fw && (!min_time || fw < min_time && fw >= cr)) {
+								min_time = fw;
+							}
+						}
+					}
+				else
+					for (const unsigned long long vname : names) {
+						if (lnames[i].find(vname) != lnames[i].end()) {
+							clock_rdtsc cr, fw, fr, lw, lr;
+							CONTEXTS[i]->FRAME.load()->statistics(vname, cr, fw, fr, lw, lr);
+							if (fw && (!min_time || fw < min_time && fw >= cr)) {
+								min_time = fw;
+							}
+						}
+					}
+				return min_time + 0.1 * i;
+			}
+			else
+				return i * 1E50;
+			};
+
+		for (int j = 0; j < CONTEXTS.size(); j++) {
+			keys.insert({ j, get_key(j) });
+		}
+
+		for (int i = first; i <= last; i++)
+			if (stoppeds[i]) {
+				std::set<int> conflicted;
+				conflicted.insert(i);
+				for (int k = 0; k < i; k++)
+					if (M[k][i])
+						conflicted.insert(k);
+				for (int k = i + 1; k < CONTEXTS.size(); k++)
+					if (M[i][k])
+						conflicted.insert(k);
+				std::map<double, int> parallels;
+				for (int j = 0; j < CONTEXTS.size(); j++) {
+					if (i != j && stoppeds[j] && conflicted.find(j) == conflicted.end())
+						parallels.insert({ keys[j], j });
+				}
+				int candidate = i;
+				if (parallels.size() > 1) {
+					double key = keys[i];
+					if (!mainlined) parallels.insert({ key, i });
+					candidate = parallels.begin()->second;
+					if (!mainlined) parallels.erase(key);
+					for (int j = 0; j < CONTEXTS.size(); j++)
+						for (int k = j + 1; k < CONTEXTS.size(); k++)
+							if (M[j][k]) {
+								parallels.erase(keys[j]);
+								parallels.erase(keys[k]);
+							}
+				}
+				if (mainlined) {
+					parallels.insert({ keys[candidate], candidate });
+					parallels.erase(keys[i]);
+					parallels.insert({ -keys[i], i });
+					candidate = i;
+				}
+				else {
+					parallels.insert({ keys[i], i });
+					parallels.erase(keys[candidate]);
+					parallels.insert({ -keys[candidate], candidate });
+				}
+				if ((sequential < 0 || candidate == sequential || parallels.find(keys[sequential]) != parallels.end() || parallels.find(-keys[sequential]) != parallels.end()) &&
+					parallels.size() > other_winners.size()) {
+					other_winners = parallels;
+					first_winner = candidate;
+				}
+			}
+		if (first_winner < 0) {
+			if (sequential >= 0)
+				first_winner = sequential;
+			else {
+				double min_val = 1E70;
+				for (auto& p : keys)
+					if (p.second < min_val) {
+						min_val = p.second;
+						first_winner = p.first;
+					}
+			}
+			if (first_winner >= 0) {
+				double key = keys[first_winner];
+				other_winners.erase(key);
+				other_winners.insert({ -key, first_winner });
+			}
+		}
+		f->unregister_facts(false, this);
+		if (mainlined)
+		{
+			double key = keys[first_winner];
+			other_winners.erase(key);
+			other_winners.erase(-key);
+			joineds[CONTEXTS.size() - 1] = true;
+			stoppeds[CONTEXTS.size() - 1] = false;
+			success++;
+			joined++;
+		}
+		if (sequential >= 0 && (other_winners.size() == 0 || other_winners.begin()->second != sequential)) {
+			other_winners.clear();
+			if (!rollback[sequential])
+				other_winners.insert({ keys[sequential], sequential });
+		}
+		// Set vars by threads with non-zero first_writes
+		stopped_by_true = false;
+		for (auto& _winner : other_winners) {
+			int winner = _winner.second;
+			if (sequential >= 0 && (rollback[winner] || winner != sequential)) {
+				for (int rollb = sequential; rollb < CONTEXTS.size() - 1; rollb++) {
+					stoppeds[rollb] = false;
+					rollback[rollb] = true;
+					double key = keys[rollb];
+					other_winners.erase(key);
+					other_winners.erase(-key);
+					stopped--;
+				}
+				break;
+			}
+			for (const unsigned long long vname : names)
+				if (lnames[winner].find(vname) != lnames[winner].end() && CONTEXTS[winner]->FRAME.load()->first_write(vname))
+				{
+					if (get_first_char(vname) == '!') {
+						if (DB != CONTEXTS[winner]->DB) {
+							string _vname = atomizer.get_string(get_name_code(vname));
+							string fact = _vname.substr(1);
+							std::unique_lock<fastmux> dblock(*DBLOCK);
+							std::unique_lock<fastmux> wdblock(*CONTEXTS[winner]->DBLOCK);
+							CONTEXTS[winner]->apply_transactional_db_to_parent(fact);
+							wdblock.unlock();
+							dblock.unlock();
+						}
+					}
+					else if (get_first_char(vname) == '*' || CONTEXTS[winner]->THR->get_result())
+					{
+						f->lock();
+						value* old = f->get(true, this, vname);
+						value* cur = CONTEXTS[winner]->FRAME.load()->get(false, CONTEXTS[winner], vname);
+						if (cur)
+							if (old && get_first_char(vname) != '*') {
+								if (!old->unify(this, f, cur))
+									CONTEXTS[winner]->THR->set_result(false);
+							}
+							else
+								f->set(true, this, vname, cur);
+						f->unlock();
+					}
+				}
+			if (sequential >= 0) {
+				sequential++;
+				if (CONTEXTS[winner]->THR->get_result()) {
+					for (int rollb = sequential; rollb < CONTEXTS.size() - 1; rollb++) {
+						stoppeds[rollb] = false;
+						rollback[rollb] = true;
+						double key = keys[rollb];
+						other_winners.erase(key);
+						other_winners.erase(-key);
+						stopped--;
+					}
+					stopped_by_true = true;
+					break;
+				}
+			}
+		}
+		// Join first_winner && other_winners
+		for (auto& _i : other_winners) {
+			int i = _i.second;
+			if (stoppeds[i]) {
+				CONTEXTS[i]->THR->set_context(NULL);
+				CONTEXTS[i]->THR->set_terminated(true);
+				{
+					std::lock_guard<fastmux> lk(CONTEXTS[i]->THR->get_stopped_mutex());
+					CONTEXTS[i]->THR->set_stopped(false);
+					CONTEXTS[i]->THR->get_stopped_var().notify_one();
+				}
+				{
+					std::unique_lock<fastmux> lk(CONTEXTS[i]->THR->get_terminated_mutex());
+					while (CONTEXTS[i]->THR->is_terminated())
+						CONTEXTS[i]->THR->get_terminated_var().wait(lk);
+				}
+				joineds[i] = true;
+				if (CONTEXTS[i]->THR->get_result())
+					success++;
+				joined++;
+			}
+		}
+		for (int i = 0; i < CONTEXTS.size(); i++)
+			if (stoppeds[i] || rollback[i]) {
+				double key = keys[i];
+				if (rollback[i] || other_winners.find(key) == other_winners.end() && other_winners.find(-key) == other_winners.end()) {
+					if (CONTEXTS[i]->transactable_facts) { // Undo facts
+						std::unique_lock<fastmux> lock(*DBLOCK);
+						std::unique_lock<fastmux> ilock(*CONTEXTS[i]->DBLOCK);
+						// Delete journal, including deleted nodes
+						map<unsigned long long, std::atomic<journal*>>::iterator itj = CONTEXTS[i]->DBJournal->begin();
+						while (itj != CONTEXTS[i]->DBJournal->end()) {
+							delete itj->second;
+							itj++;
+						}
+						CONTEXTS[i]->DBJournal->clear();
+						vector<term*> Q;
+						// Clear local DB
+						map< string, std::atomic<vector<term*>*>>::iterator itd = CONTEXTS[i]->DB->begin();
+						while (itd != CONTEXTS[i]->DB->end()) {
+							if (itd->second) {
+								for (term* v : *itd->second)
+									Q.push_back(v);
+								delete itd->second;
+							}
+							itd++;
+						}
+						CONTEXTS[i]->DB->clear();
+						// Reload DB
+						itd = DB->begin();
+						while (itd != DB->end()) {
+							if (itd->second) {
+								(*CONTEXTS[i]->DB)[itd->first] = new vector<term*>(*itd->second);
+								for (term* v : *itd->second)
+									v->use();
+							}
+							itd++;
+						}
+						for (term* v : Q) {
+							v->free();
+						}
+						ilock.unlock();
+						lock.unlock();
+					}
+					// CONTEXTS[i]->REFRESH(sequential_mode, f, this, INTRP);
+					if (stopped_by_true) {
+						CONTEXTS[i]->THR->set_context(NULL);
+						CONTEXTS[i]->THR->set_terminated(true);
+						{
+							std::lock_guard<fastmux> lk(CONTEXTS[i]->THR->get_stopped_mutex());
+							CONTEXTS[i]->THR->set_stopped(false);
+							CONTEXTS[i]->THR->get_stopped_var().notify_one();
+						}
+						{
+							std::unique_lock<fastmux> lk(CONTEXTS[i]->THR->get_terminated_mutex());
+							while (CONTEXTS[i]->THR->is_terminated())
+								CONTEXTS[i]->THR->get_terminated_var().wait(lk);
+						}
+						joineds[i] = true;
+						if (CONTEXTS[i]->THR->get_result())
+							success++;
+						joined++;
+					}
+					else {
+						FRAMES_TO_DELETE.push(CONTEXTS[i]->FRAME.load());
+						// if (sequential >= 0) {
+						tframe_item* newf = CONTEXTS[i]->INIT.load()->tcopy(this, INTRP);
+						newf->forced_import_transacted_globs(this, f);
+						CONTEXTS[i]->FRAME.store(newf);
+						// }
+						// else
+						//	CONTEXTS[i]->FRAME.store(f->tcopy(this, INTRP, false));
+						CONTEXTS[i]->set_rollback(false);
+						{
+							std::lock_guard<fastmux> lk(CONTEXTS[i]->THR->get_stopped_mutex());
+							CONTEXTS[i]->THR->set_stopped(false);
+							CONTEXTS[i]->THR->get_stopped_var().notify_one();
+						}
+					}
+				}
+			}
+		tries++;
+	} while (joined < CONTEXTS.size());
+
+	joined--;
+	success--;
+	CONTEXTS.pop_back();
+
+	predicate_item_join* fork_join = dynamic_cast<predicate_item_join*>(starred);
+	predicate_item* star_forker = fork_join ? fork_join->get_star_forker() : NULL;
+	if (star_forker && (star_forker->get_bad_tries() + star_forker->get_good_tries() < 5)) {
+		if (4 * tries / 3 >= CONTEXTS.size())
+			star_forker->set_bad_tries(star_forker->get_bad_tries() + 1);
+		else
+			star_forker->set_good_tries(star_forker->get_good_tries() + 1);
+	}
+
+	bool result =
+		(sequential >= 0 && stopped_by_true) ||
+		(sequential < 0 && (K < 0 && success == CONTEXTS.size() || K >= 0 && success >= K));
+
+	prolog->GLOCK.lock();
+	f->lock();
+	for (const unsigned long long vname : names)
+		if (get_first_char(vname) != '!')
+		{
+			value* v = f->get(true, this, vname);
+			for (int i = 0; i < CONTEXTS.size(); i++)
+				CONTEXTS[i]->FRAME.load()->set(false, CONTEXTS[i], vname, NULL);
+			if (!forked && v && get_first_char(vname) == '*') {
+				string _vname = atomizer.get_string(get_name_code(vname));
+				string src_name = _vname.substr(1);
+				std::map<std::string, value*>::iterator it = prolog->GVars.find(src_name);
+				if (it != prolog->GVars.end()) {
+					it->second->free();
+				}
+				prolog->GVars[src_name] = v->const_copy(this, f);
+			}
+		}
+	f->unlock();
+	prolog->GLOCK.unlock();
+
+	int ctx = 0;
+	bool cutted = false;
+	for (context* C : CONTEXTS) {
+		tthread* t = C->THR;
+		if (ctx < sequential) {
+			for (int i = 0; i < C->cut_query.size(); i++) {
+				if (C->cut_query[i](prolog, this) && parent)
+					cut_query.push_back(C->cut_query[i]);
+				cutted = true;
+			}
+		}
+		else if (stopped_by_true)
+			if (rest) {
+				rest->push_back(C->INIT.load());
+				C->INIT.store(NULL);
+			}
+		delete C;
+		prolog->THREAD_POOL->free_thread(t);
+		long long wait_time = C->pseudo_time > pseudo_time ? C->pseudo_time - pseudo_time : 0;
+		if (wait_time > pseudo_duration)
+			pseudo_duration = wait_time;
+		ctx++;
+	}
+
+	pseudo_duration += pseudo_costs;
+
+	if (cutted) {
+		sequential = (int)CONTEXTS.size();
+		if (rest) {
+			for (auto ff : *rest)
+				delete ff;
+			rest->clear();
+		}
+	}
+	CONTEXTS.clear();
+
+	lock.unlock();
+	return result;
+}
+
+void predicate_item::add_export(std::set<int>& end_points, bool skip_brackets, string& result, string& offset, bool introduce_new_parallelism) {
+	result += offset;
+	if (neg)
+		result += "\\+ ";
+	if (call) {
+		result += "call";
+	}
+	else if (once) {
+		result += "once";
+	}
+	else if (starred_end >= 0 || introduce_new_parallelism && (get_parallelizing_status() & PAR_SEQ)) {
+		result += "*";
+		if (conditional_star_mode || introduce_new_parallelism && (get_parallelizing_status() & PAR_SEQ)) {
+			result += "?";
+			for (int i = 0; i < star_good_tries; i++)
+				result += "+";
+			for (int i = 0; i < star_bad_tries; i++)
+				result += "-";
+		}
+	}
+	contextual_export(end_points, result, offset, introduce_new_parallelism);
+	if (end_points.find(self_number + 1) != end_points.end()) {
+		result += "\n";
+		offset.erase(offset.length() - 4);
+		result += offset;
+		result += "}";
+	}
+	if (!is_last(skip_brackets)) {
+		predicate_item* next = get_strict_next();
+		if (next &&
+			dynamic_cast<predicate_right_bracket*>(next) == NULL &&
+			dynamic_cast<predicate_or*>(this) == NULL &&
+			dynamic_cast<predicate_left_bracket*>(this) == NULL &&
+			dynamic_cast<predicate_item_fork*>(this) == NULL &&
+			(dynamic_cast<predicate_item_join*>(next) == NULL || !((predicate_item_join*)next)->get_starred()) &&
+			dynamic_cast<predicate_or*>(next) == NULL)
+			if (starred_end >= 0 || introduce_new_parallelism && (get_parallelizing_status() & PAR_SEQ)) {
+				result += "{";
+				offset += "    ";
+			}
+			else if (result.length() < 2 || result.substr(result.length()-2) != "->")
+				result += ",";
+	}
+}
+
+void predicate_item::contextual_export(std::set<int>& end_points, string& result, string& offset, bool introduce_new_parallelism) {
+	simple_export(get_id(), result, offset, introduce_new_parallelism);
+}
+
+void predicate_item::simple_export(const string& name, string& result, string& offset, bool introduce_new_parallelism) {
+	result += name;
+	if (args.size()) {
+		result += "(";
+		for (const string& a : args) {
+			result += a;
+			result += ",";
+		}
+		result[result.length() - 1] = ')';
+	}
+}
+
+void clause::add_export(string& result, bool introduce_new_parallelism) {
+	result += parent->get_name();
+	if (args.size()) {
+		result += "(";
+		for (const string& a : args) {
+			result += a;
+			result += ",";
+		}
+		result[result.length() - 1] = ')';
+	}
+	if (items.size()) {
+		result += " :- \n";
+		string offset = "    ";
+		bool surrounded = dynamic_cast<predicate_left_bracket*>(items.front()) && dynamic_cast<predicate_right_bracket*>(items.back());
+		std::set<int> end_points;
+		for (predicate_item* p : items) {
+			predicate_item* prev = !p->is_first() ? p->get_strict_prev() : NULL;
+			if (prev && introduce_new_parallelism && (prev->get_parallelizing_status() & PAR_SEQ_JOIN_AFTER)) {
+				if (result.length() > 1 && result[result.length() - 1] != '\n')
+					result += "\n";
+				offset.erase(offset.length() - 4);
+				result += offset;
+				result += "}";
+
+				if (dynamic_cast<predicate_right_bracket*>(p) == NULL &&
+					dynamic_cast<predicate_or*>(prev) == NULL &&
+					dynamic_cast<predicate_left_bracket*>(prev) == NULL &&
+					dynamic_cast<predicate_item_fork*>(prev) == NULL &&
+					(dynamic_cast<predicate_item_join*>(p) == NULL || !((predicate_item_join*)p)->get_starred()) &&
+					dynamic_cast<predicate_or*>(p) == NULL)
+					result += ",";
+				if (!prev->is_last(surrounded) && !(surrounded && prev->is_first()))
+					result += "\n";
+			}
+			if (!surrounded || (!p->is_first() && !p->is_last())) {
+				if (dynamic_cast<predicate_item_true*>(p) &&
+					!p->is_last() &&
+					dynamic_cast<predicate_item_true*>(p->get_strict_next()))
+					continue;
+				p->add_export(end_points, surrounded, result, offset, introduce_new_parallelism);
+			}
+			else {
+				if (!p->is_first() && introduce_new_parallelism && (p->get_parallelizing_status() & PAR_SEQ_JOIN_AFTER)) {
+					result += "\n";
+					offset.erase(offset.length() - 4);
+					result += offset;
+					result += "}";
+				}
+			}
+			if (!p->is_last(surrounded) && !(surrounded && p->is_first()))
+				result += "\n";
+		}
+		result += ".\n";
+	}
+	else
+		result += ".\n";
+}
+
 #ifdef __linux__
 unsigned long long getTotalSystemMemory()
 {
@@ -10070,7 +10759,7 @@ int main(int argc, char ** argv) {
 			body.append("\n");
 			bypass_spaces(body, p);
 			while (p < body.length()) {
-				prolog.parse_clause(prolog.CONTEXT, renew, f, body, p);
+				prolog.parse_clause(prolog.CONTEXT, renew, f, body, p, false);
 				bypass_spaces(body, p);
 			}
 			prolog.bind();
@@ -10102,7 +10791,9 @@ int main(int argc, char ** argv) {
 			std::cout << endl;
 			std::cout << "Elapsed: " << elapsed.count() << " sec." << std::endl;
 			std::cout << (ret ? "true" : "false") << endl;
-			
+
+			prolog.writeOptimized(); // !!!
+
 			delete pi;
 			delete f;
 
@@ -10119,6 +10810,8 @@ int main(int argc, char ** argv) {
 			std::chrono::duration<double, std::ratio<1, 1>> elapsed = end - start; // Вычисляем длительность исполнения
 			std::cout << endl;
 			std::cout << "Elapsed: " << elapsed.count() << " sec." << std::endl;
+
+			prolog.writeOptimized(); // !!!
 		}
 		else
 			std::cout << "Goal absent!" << endl;
@@ -10142,7 +10835,7 @@ int main(int argc, char ** argv) {
 
 		bypass_spaces(body, p);
 		while (p < body.length()) {
-			_prolog->parse_clause(_prolog->CONTEXT, renew, f, body, p);
+			_prolog->parse_clause(_prolog->CONTEXT, renew, f, body, p, false);
 			bypass_spaces(body, p);
 		}
 		_prolog->bind();
@@ -10174,7 +10867,7 @@ int main(int argc, char ** argv) {
 			body.append("\n");
 			bypass_spaces(body, p);
 			while (p < body.length()) {
-				_prolog->parse_clause(_prolog->CONTEXT, renew, f, body, p);
+				_prolog->parse_clause(_prolog->CONTEXT, renew, f, body, p, false);
 				bypass_spaces(body, p);
 			}
 			_prolog->bind();
@@ -10207,6 +10900,8 @@ int main(int argc, char ** argv) {
 			std::cout << "Elapsed: " << elapsed.count() << " sec." << std::endl;
 			std::cout << (ret ? "true" : "false") << endl;
 
+			_prolog->writeOptimized(); // !!!
+
 			delete pi;
 			delete f;
 		}
@@ -10215,7 +10910,7 @@ int main(int argc, char ** argv) {
 	else {
 		std::cout << "Usage: prolog_micro_brain.exe [FLAGS] [--query-goal <goal> ... | -consult <file.pro> <goal_predicate_name>]" << endl;
 		std::cout << "   FLAGS:" << endl;
-		std::cout << "      --saluer    -- Undocumented" << endl;
+		std::cout << "      --saluer    -- Undocumented yet" << endl;
 	}
 	return 0;
 }

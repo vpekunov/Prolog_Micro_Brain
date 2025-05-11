@@ -26,6 +26,10 @@ extern const char * STD_OUTPUT;
 const int once_flag = 0x1;
 const int call_flag = 0x2;
 
+const int PAR_NONE = 0;
+const int PAR_SEQ = 1;
+const int PAR_SEQ_JOIN_AFTER = 2;
+
 unsigned long long getTotalSystemMemory();
 unsigned int getTotalProcs();
 
@@ -196,6 +200,8 @@ public:
 	bool transactable_facts;
 	bool rollback;
 
+	long long pseudo_time;
+
 	stack_container<std::function<bool(interpreter*, context*)>> cut_query;
 
 	stack_container<frame_item*> SEQ_RESULT;
@@ -224,6 +230,8 @@ public:
 	std::list<int> FLAGS;
 	stack_container<int> LEVELS;
 	stack_container<generated_vars*> TRACE;
+	stack_container<long long> START_TIMES;
+	stack_container<clause *> START_CLAUSES;
 	stack_container<vector<value*>**> TRACEARGS;
 	stack_container<predicate_item*> TRACERS;
 	stack_container<int> ptrTRACE;
@@ -236,7 +244,7 @@ public:
 
 	virtual void register_db_write(const unsigned long long iid, jTypes t, value* data, int position, journal * src = NULL);
 	
-	virtual bool join(bool sequential_mode, int K, frame_item* f, interpreter* INTRP, int & sequential, vector<frame_item*> * rest);
+	virtual bool join(bool sequential_mode, int K, frame_item* f, interpreter* INTRP, int & sequential, vector<frame_item*> * rest, long long & pseudo_duration, predicate_item * starred);
 
 	virtual void apply_transactional_db_to_parent(const std::string & fact);
 };
@@ -339,12 +347,20 @@ public:
 		id_nonvar,
 		id_get_icontacts,
 		id_get_ocontacts,
-		id_rollback
+		id_rollback,
+		id_optimize_load,
+		id_parallelize_level
 	} ids;
 
 	thread_pool* THREAD_POOL;
 	fastmux VARLOCK;
 	unsigned int ITERATION_STAR_PACKET;
+
+	bool load_optimized = false; // true;
+	long long min_parallelizing_time = -1; // 1000;
+
+	map<string, std::set<string> *> consulted;
+	map<string, long long> consulted_cs;
 
 	map<string, ids> MAP{
 		{ "append", id_append },
@@ -440,7 +456,11 @@ public:
 		{ "nonvar", id_nonvar },
 		{ "get_icontacts", id_get_icontacts },
 		{ "get_ocontacts", id_get_ocontacts },
-		{ "rollback", id_rollback }
+		{ "rollback", id_rollback },
+		{ "optimize_load", id_optimize_load },
+		{ "load_optimized", id_optimize_load },
+		{ "parallelize_level", id_parallelize_level }
+
 	};
 
 	string CLASSES_ROOT;
@@ -454,6 +474,8 @@ public:
 
 	map< string, set<int>*> DBIndicators;
 	fastmux DBILock;
+
+	bool std_body_added = false;
 
 	context* CONTEXT;
 
@@ -469,6 +491,8 @@ public:
 
 	interpreter(const string & fname, const string & starter_name);
 	~interpreter();
+
+	virtual string export_str(bool introduce_new_parallelism, std::set<string>* exported);
 
 	bool XPathCompiled() const {
 		return xpath_compiled;
@@ -518,6 +542,10 @@ public:
 		return env;
 	}
 
+	void writeOptimized();
+
+	long long calculate_check_sum(ifstream& in);
+
 	string open_file(const string & fname, const string & mode);
 	void close_file(const string & obj);
 	std::basic_fstream<char> & get_file(const string & obj, int & fn);
@@ -541,8 +569,8 @@ public:
 	predicate_item_user * load_program(const string & fname, const string & starter_name);
 
 	value * parse(context* CTX, bool exit_on_error, bool parse_complex_terms, frame_item * ff, const string & s, size_t & p);
-	void parse_program(vector<string> & renew, string & s);
-	void parse_clause(context* CTX, vector<string> & renew, frame_item * ff, string & s, size_t & p);
+	void parse_program(vector<string> & renew, string & s, std::set<string>* loaded_predicates, bool optimized);
+	string parse_clause(context* CTX, vector<string> & renew, frame_item * ff, string & s, size_t & p, bool optimized);
 	bool unify(context* CTX, frame_item * ff, value * from, value * to);
 
 	void run();
@@ -1194,6 +1222,8 @@ private:
 	vector<predicate_item *> items;
 	fastmux mutex;
 	bool forking;
+
+	int cached_is_not_pure_result;
 public:
 	clause(predicate * pp) : parent(pp), forking(false) { }
 	~clause();
@@ -1202,6 +1232,10 @@ public:
 	void unlock() { mutex.unlock(); }
 
 	virtual void bind(bool starring);
+
+	virtual void add_export(string& result, bool introduce_new_parallelism);
+
+	virtual int is_not_pure() { return cached_is_not_pure_result; }
 
 	predicate * get_predicate() { return parent; }
 
@@ -1245,9 +1279,13 @@ protected:
 	int starred_end;
 	bool conditional_star_mode;
 	bool is_starred;
+	int star_good_tries;
+	int star_bad_tries;
 	clause * parent;
 	std::list<string> args;
 	std::list<value *> _args;
+
+	int parallelizing_status;
 
 	interpreter * prolog;
 
@@ -1260,19 +1298,35 @@ protected:
 public:
 	predicate_item(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : neg(_neg), once(_once), call(_call),
 		self_number(num), starred_end(-1), parent(c), critical(NULL), prolog(_prolog),
-		conditional_star_mode(false), is_starred(false) { }
+		conditional_star_mode(false), is_starred(false), parallelizing_status(PAR_NONE),
+		star_good_tries(0), star_bad_tries(0) { }
 
 	virtual ~predicate_item() {
 		for (value * v : _args)
 			v->free();
 	}
 
+	virtual void add_export(std::set<int>& end_points, bool skip_brackets, string& result, string& offset, bool introduce_new_parallelism);
+	virtual void contextual_export(std::set<int>& end_points, string& result, string& offset, bool introduce_new_parallelism);
+	virtual void simple_export(const string& name, string& result, string& offset, bool introduce_new_parallelism);
+
+	virtual int get_parallelizing_status() { return parallelizing_status; }
+	virtual void include_parallelizing_status(int flag) { parallelizing_status |= flag; }
+	virtual void clear_parallelizing_status() { parallelizing_status = PAR_NONE; }
+
+	virtual void set_good_tries(int v) { star_good_tries = v; }
+	virtual int get_good_tries() { return star_good_tries; }
+	virtual void set_bad_tries(int v) { star_bad_tries = v; }
+	virtual int get_bad_tries() { return star_bad_tries; }
+
 	virtual void set_starred_end(int end) {
 		this->starred_end = end;
 	}
 
-	virtual void set_conditional_star_mode(bool v) {
+	virtual void set_conditional_star_mode(bool v, int goods, int bads) {
 		conditional_star_mode = v;
+		star_good_tries = goods;
+		star_bad_tries = bads;
 	}
 
 	virtual bool get_conditional_star_mode() {
@@ -1284,6 +1338,10 @@ public:
 		if (this->starred_end >= 0)
 			parent->get_item(this->starred_end)->set_starred(v);
 	}
+
+	virtual bool get_starred() { return is_starred; }
+
+	virtual int get_strict_starred_end() { return this->starred_end; }
 
 	virtual int get_starred_end() {
 		if (conditional_star_mode)
@@ -1313,20 +1371,20 @@ public:
 	void lock() { mutex.lock(); }
 	void unlock() { mutex.unlock(); }
 
-	virtual bool is_not_pure(std::set<string> & work_set) {
-		work_set.insert(get_id());
-		return false;
+	virtual int is_not_pure(std::set<string> * work_set) {
+		work_set->insert(get_id());
+		return 0;
 	}
 
 	virtual void bind(bool starring) {
 		if (starring && conditional_star_mode) {
 			std::set<string> work_set;
 			for (int i = self_number; i < starred_end; i++)
-				if (parent->get_item(i)->is_not_pure(work_set)) {
+				if (parent->get_item(i)->is_not_pure(&work_set)) {
 					set_starred(false);
 					return;
 				}
-			set_starred(true);
+			if (star_bad_tries + star_good_tries < 5 || star_bad_tries < star_good_tries) set_starred(true);
 		}
 	}
 
@@ -1367,6 +1425,10 @@ public:
 		return parent->get_item(self_number + 1);
 	}
 
+	virtual predicate_item* get_strict_prev() {
+		return parent->get_item(self_number - 1);
+	}
+
 	virtual frame_item * get_next_variant(context * CTX, frame_item * f, int & internal_variant, vector<value *> * positional_vals) { return NULL; }
 
 	const std::list<string> * get_args() {
@@ -1375,12 +1437,18 @@ public:
 
 	clause * get_parent() { return parent; }
 
-	bool is_first() const { return self_number == 0; }
-	bool is_last() const { return !parent || self_number == parent->items.size() - 1; }
+	bool is_first(bool skip_brackets = false) const {
+		return skip_brackets ? self_number <= 1 : self_number == 0;
+	}
+	bool is_last(bool skip_brackets = false) const {
+		return skip_brackets ? !parent || self_number >= parent->items.size() - 2 : !parent || self_number == parent->items.size() - 1;
+	}
+
+	virtual int get_self_number() { return self_number; }
 
 	virtual generated_vars * generate_variants(context * CTX, frame_item * f, vector<value *> * & positional_vals) = 0;
 
-	virtual bool execute(context * CTX, frame_item * &f, int i, generated_vars* variants) {
+	virtual bool execute(context * CTX, frame_item * &f, int i, generated_vars* variants, long long & pseudo_duration) {
 		return true;
 	}
 };
@@ -1391,14 +1459,27 @@ class predicate {
 private:
 	string name;
 	vector<clause *> clauses;
+	bool runned;
 	bool forking;
 public:
-	predicate(const string & _name) : name(_name), forking(false) { }
+	predicate(const string & _name) : name(_name), runned(false), forking(false) { }
 	~predicate();
+
+	const string& get_name() { return name; }
+
+	void mark_runned() { runned = true; }
+	bool is_runned() { return runned; }
 
 	void bind(bool starring) {
 		for (clause * c : clauses)
 			c->bind(starring);
+	}
+
+	virtual void add_export(string& result, bool introduce_new_parallelism) {
+		for (clause* c : clauses) {
+			c->add_export(result, introduce_new_parallelism);
+			result += "\n";
+		}
 	}
 
 	void add_clause(clause * c) {
@@ -1421,9 +1502,13 @@ class predicate_item_user : public predicate_item {
 private:
 	string id;
 	predicate * user_p;
+	bool cached_is_not_pure;
+	int cached_is_not_pure_result;
 public:
 	predicate_item_user(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog, const string & _name) : predicate_item(_neg, _once, _call, num, c, _prolog), id(_name) {
 		user_p = NULL;
+		cached_is_not_pure = false;
+		cached_is_not_pure_result = 0;
 	}
 
 	virtual void bind(bool starring);
@@ -1436,11 +1521,12 @@ public:
 
 	virtual const string get_id() { return id; }
 
-	virtual bool is_not_pure(std::set<string>& work_set);
+	virtual int is_not_pure(std::set<string> * work_set);
 
 	virtual generated_vars * generate_variants(context * CTX, frame_item * f, vector<value *> * & positional_vals);
 
-	virtual bool processing(context * CONTEXT, bool line_neg, int variant, generated_vars * variants, vector<value *> ** positional_vals, frame_item * up_f, context * up_c);
+	virtual bool processing(context * CONTEXT, bool line_neg, int variant, generated_vars * variants, vector<value *> ** positional_vals,
+		frame_item * up_f, context * up_c);
 };
 
 class journal_item {

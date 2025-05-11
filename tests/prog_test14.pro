@@ -96,8 +96,8 @@ solve1(LL):-
 run1:-
   solve1(LL), write(LL), fail.
 
-% Решаем! Результат = список LL
-solveN(LL):-
+% Решаем! Результат = solution(_)
+solveN:-
   % Генерируем вариант (родные языки для каждого туриста НЕ ВКЛЮЧАЕМ)
   retractall(solution(_)),
   pvariant([lpolyak,lfinn,lshved,lnemets],Lvengr),
@@ -136,4 +136,4 @@ solveN(LL):-
   {=0}.
 
 runN:-
-  solveN(LL), solution(LL), write(LL), fail.
+  solveN, solution(LL), write(LL), fail.

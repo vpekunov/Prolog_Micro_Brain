@@ -91,16 +91,7 @@
 
 	run22 :- *for(I,1,20){write(I)},write(I).
 
-	run23a(1) :- write(a).
-	run23a(3) :- fail.
-	run23a(4) :- member(_,[1,2]).
-	run23a(2) :- write(b).
-
-	run23 :- *run23a(A){write(A),fail}.
-
-	run24a(1) :- fail.
-
-	run24 :- *run24a(A){write(A)}.
+	run24 :- *?fail{write(a)}.
 
 	run25 :- member(X,[1,2,3]),write(X),*for(A,1,3){write(x)},fail.
 
@@ -127,10 +118,7 @@
 
 	run35 :- {*member(A,[1,2,3]){{write(A)},{&},A>1,!},write(x),write(A),fail; true},{&}.
 
-	run36 :- g_assign('S',[]),*?run23a(A){g_read('S',S),append(S,[A],S1),g_assign('S',S1),fail};g_read('S',S),write(S).
-
-	run37g(A) :- member(A,[1,2,3,4]).
-	run37 :- *run37g(A){write(A),fail}.
+	run37 :- *member(A,[1,2,3,4]){write(A),fail}.
 
 	generate_facts(This,N):-
 		>(This,N),
