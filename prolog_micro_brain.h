@@ -19,6 +19,7 @@
 using namespace std;
 
 #include "elements.h"
+#include "symbolic.h"
 
 extern const char * STD_INPUT;
 extern const char * STD_OUTPUT;
@@ -325,6 +326,11 @@ public:
 		id_repeat,
 		id_random,
 		id_randomize,
+		id_regularize,
+		id_add,
+		id_mul,
+		id_div,
+		id_to_chain,
 		id_char_code,
 		id_get_code,
 		id_at_end_of_stream,
@@ -434,6 +440,11 @@ public:
 		{ "repeat", id_repeat },
 		{ "random", id_random },
 		{ "randomize", id_randomize },
+		{ "regularize", id_regularize },
+		{ "add", id_add },
+		{ "mul", id_mul },
+		{ "div", id_div },
+		{ "to_chain", id_to_chain },
 		{ "char_code", id_char_code },
 		{ "get_code", id_get_code },
 		{ "at_end_of_stream", id_at_end_of_stream },
@@ -553,6 +564,8 @@ public:
 	bool block_process(context * CNT, bool clear_flag, bool cut_flag, predicate_item * frontier, bool frontier_enough = false);
 
 	double evaluate(context* CTX, frame_item * ff, const string & expression, size_t & p);
+	SUM* deserialize_symbolic(const string& expression, size_t& p, vector<string>& Vars);
+	string serialize_symbolic(ITEM * expression, vector<string>& Vars);
 
 	bool check_consistency(set<string> & dynamic_prefixes);
 
@@ -1286,6 +1299,7 @@ protected:
 	std::list<value *> _args;
 
 	int parallelizing_status;
+	bool determined;
 
 	interpreter * prolog;
 
@@ -1299,11 +1313,18 @@ public:
 	predicate_item(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : neg(_neg), once(_once), call(_call),
 		self_number(num), starred_end(-1), parent(c), critical(NULL), prolog(_prolog),
 		conditional_star_mode(false), is_starred(false), parallelizing_status(PAR_NONE),
-		star_good_tries(0), star_bad_tries(0) { }
+		star_good_tries(0), star_bad_tries(0) {
+		determined = true;
+	}
 
 	virtual ~predicate_item() {
 		for (value * v : _args)
 			v->free();
+	}
+
+	virtual bool get_determined() { return determined; }
+	virtual void check_determinancy() {
+		// Empty
 	}
 
 	virtual void add_export(std::set<int>& end_points, bool skip_brackets, string& result, string& offset, bool introduce_new_parallelism);
@@ -1509,6 +1530,10 @@ public:
 		user_p = NULL;
 		cached_is_not_pure = false;
 		cached_is_not_pure_result = 0;
+	}
+
+	virtual void check_determinancy(set<predicate_item *> & passed) {
+		// Ecrivez! Pour determiner 'determined'
 	}
 
 	virtual void bind(bool starring);

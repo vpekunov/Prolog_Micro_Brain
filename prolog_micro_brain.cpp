@@ -2253,8 +2253,8 @@ string interpreter::export_str(bool introduce_new_parallelism, std::set<string> 
 }
 
 double interpreter::evaluate(context * CTX, frame_item * ff, const string & expression, size_t & p) {
-	string ops = "(+-*/";
-	int priors[5] = { 0, 1, 1, 2, 2 };
+	string ops = "(+-*/^";
+	int priors[6] = { 0, 1, 1, 2, 2, 3 };
 
 	stack<char> opers;
 
@@ -2285,6 +2285,7 @@ double interpreter::evaluate(context * CTX, frame_item * ff, const string & expr
 			case '-': v = v1 - v2; break;
 			case '*': v = v1 * v2; break;
 			case '/': v = v1 / v2; break;
+			case '^': v = pow(v1, v2); break;
 		}
 		vals.push(v);
 		postfix.pop();
@@ -2420,6 +2421,13 @@ double interpreter::evaluate(context * CTX, frame_item * ff, const string & expr
 				can_be_neg = false;
 			}
 			else {
+				char op = expression[p];
+				p++;
+				if (op == '*' && p < expression.length() && expression[p] == '*') {
+					op = '^';
+					p++;
+					pos = ops.find(op);
+				}
 				while (opers.size()) {
 					if (priors[pos] > priors[ops.find(opers.top())]) break;
 					pitem p = { true };
@@ -2427,8 +2435,7 @@ double interpreter::evaluate(context * CTX, frame_item * ff, const string & expr
 					postfix.push(p);
 					opers.pop();
 				}
-				opers.push(expression[p]);
-				p++;
+				opers.push(op);
 				can_be_neg = true;
 			}
 		}
@@ -2457,6 +2464,222 @@ double interpreter::evaluate(context * CTX, frame_item * ff, const string & expr
 	}
 
 	return vals.top();
+}
+
+SUM * interpreter::deserialize_symbolic(const string& expression, size_t& p, vector<string> & Vars) {
+	string ops = "(+-#*/^";
+	int priors[7] = { 0, 1, 1, 2, 3, 3, 4 };
+
+	stack<char> opers;
+
+	typedef struct {
+		bool is_op;
+		union {
+			char op;
+			char v[256];
+		};
+	} pitem;
+
+	queue<pitem> postfix;
+	stack<ITEM *> vals;
+
+	int bracket_level = 0;
+
+	bypass_spaces(expression, p);
+	while (p < expression.length()) {
+		if (expression[p] == '(') {
+			bracket_level++;
+			opers.push(expression[p]);
+			p++;
+		}
+		else if (expression[p] == ')') {
+			if (bracket_level == 0) break;
+			bracket_level--;
+			p++;
+			while (opers.size()) {
+				if (opers.top() == '(') break;
+				pitem p = { true };
+				p.op = opers.top();
+				postfix.push(p);
+				opers.pop();
+			}
+			if (opers.size() == 0) {
+				std::cout << "Evaluate(" << expression << ") : brackets disbalance!" << endl;
+				exit(105);
+			}
+			opers.pop();
+		}
+		else {
+			string::size_type pos = ops.find(expression[p]);
+			if (pos == string::npos) {
+				pitem pt = { false };
+				double v = 0;
+				size_t pp = p;
+				if (expression[p] >= '0' && expression[p] <= '9') {
+					bool flt = false;
+
+					while (p < expression.length() && expression[p] >= '0' && expression[p] <= '9')
+						v = v * 10 + (expression[p++] - '0');
+					if (expression[p] == '.') {
+						flt = true;
+						p++;
+						double q = 0.1;
+						while (p < expression.length() && expression[p] >= '0' && expression[p] <= '9') {
+							v += q * (expression[p++] - '0');
+							q /= 10.0;
+						}
+					}
+					if (expression[p] == 'E' || expression[p] == 'e') {
+						bool neg = false;
+						if (p + 1 < expression.length() && expression[p + 1] == '+')
+							p++;
+						else if (p + 1 < expression.length() && expression[p + 1] == '-') {
+							neg = true;
+							p++;
+						}
+						flt = true;
+						p++;
+						long long n = 0;
+						while (p < expression.length() && expression[p] >= '0' && expression[p] <= '9')
+							n = n * 10 + (long long)(expression[p++] - '0');
+						if (neg)
+							v *= pow(10.0, -n);
+						else
+							v *= pow(10.0, n);
+					}
+					_strcpy(pt.v, sizeof(pt.v), expression.substr(pp, p - pp).c_str());
+				}
+				else {
+					bypass_spaces(expression, p);
+					if (p < expression.length() && isalpha(expression[p])) {
+						p++;
+						while (p < expression.length() && isalnum(expression[p]))
+							p++;
+						string id = expression.substr(pp, p - pp);
+						_strcpy(pt.v, sizeof(pt.v), id.c_str());
+						vector<string>::iterator it = find(Vars.begin(), Vars.end(), id);
+						if (it == Vars.end())
+							Vars.push_back(id);
+					}
+					else {
+						std::cout << "Evaluation(" << expression << ") : Var expected!" << endl;
+						exit(105);
+					}
+				}
+				postfix.push(pt);
+			}
+			else {
+				char op = expression[p];
+				p++;
+				if (op == '*' && p < expression.length() && expression[p] == '*') {
+					op = '^';
+					p++;
+					pos = ops.find(op);
+				}
+				if (op == '-' && (p == 1 || ops.find(expression[p - 2]) != string::npos)) {
+					bool neg = true;
+					while (p < expression.length() && expression[p] == '-') {
+						neg = !neg;
+						p++;
+					}
+					if (neg) {
+						op = '#';
+						pos = ops.find(op);
+					}
+					else
+						continue;
+				}
+				while (opers.size()) {
+					if (priors[pos] > priors[ops.find(opers.top())]) break;
+					pitem p = { true };
+					p.op = opers.top();
+					postfix.push(p);
+					opers.pop();
+				}
+				opers.push(op);
+			}
+		}
+		bypass_spaces(expression, p);
+	}
+	while (opers.size()) {
+		pitem p = { true };
+		p.op = opers.top();
+		postfix.push(p);
+		opers.pop();
+	}
+
+	while (postfix.size()) {
+		pitem p = postfix.front();
+		if (p.is_op) {
+			ITEM * v2 = vals.top();
+			vals.pop();
+			ITEM* v1 = NULL;
+			if (p.op != '#') {
+				v1 = vals.top();
+				vals.pop();
+			}
+
+			ITEM * v;
+
+			switch (p.op) {
+				case '+': v = v1->Add(v2); break;
+				case '-': v = v1->Sub(v2); break;
+				case '#': v = v2->Neg(); break;
+				case '*': v = v1->Mul(v2); break;
+				case '/': v = v1->Div(v2); break;
+				case '^': v = v1->Pow(v2); break;
+			}
+			vals.push(v);
+			postfix.pop();
+		}
+		else {
+			MUL* v = NULL;
+			if (p.v[0] >= '0' && p.v[0] <= '9') {
+				long double k = 0.0;
+				sscanf(p.v, "%Lf", &k);
+				v = new MUL(k);
+			}
+			else {
+				vector<string>::iterator it = find(Vars.begin(), Vars.end(), string(p.v));
+				if (it == Vars.end()) {
+					std::cout << "Unknow var(" << p.v << ")!" << endl;
+					exit(110);
+				}
+				v = new MUL(1.0);
+				v->Mul(it - Vars.begin(), 1.0);
+			}
+			vals.push(v);
+			postfix.pop();
+		}
+	}
+
+	if (vals.size() != 1) {
+		std::cout << "Strange evaluation(" << expression << ")!" << endl;
+		exit(105);
+	}
+
+	MUL* M = dynamic_cast<MUL*>(vals.top());
+	DIV* D = dynamic_cast<DIV*>(vals.top());
+	SUM* S = dynamic_cast<SUM*>(vals.top());
+
+	return S ? S : (M ? new SUM(M) : new SUM(D));
+}
+
+string interpreter::serialize_symbolic(ITEM* expression, vector<string>& Vars) {
+	string _OUT;
+	char* VARS[4096];
+	int maxPows[4096] = { 0 };
+	int i = 0;
+	for (const string& s : Vars) {
+		VARS[i] = new char[s.length() + 1];
+		_strcpy(VARS[i], s.length() + 1, s.c_str());
+		i++;
+	}
+	_OUT.reserve(128 * 1024 * 1024);
+	expression->sprint(VARS, maxPows, &_OUT, true);
+	while (i)
+		delete[] VARS[--i];
+	return _OUT;
 }
 
 class lazy_generated_vars : public generated_vars {
@@ -2558,6 +2781,7 @@ protected:
 public:
 	predicate_or(int num, clause * c, interpreter * _prolog) : predicate_item(false, false, false, num, c, _prolog) {
 		ending = NULL;
+		determined = false;
 	}
 
 	virtual int is_not_pure(std::set<string> * work_set) {
@@ -3896,7 +4120,9 @@ public:
 class predicate_item_repeat : public predicate_item {
 	map<context*, lazy_generated_vars*> d;
 public:
-	predicate_item_repeat(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) { }
+	predicate_item_repeat(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) {
+		determined = false;
+	}
 
 	virtual const string get_id() { return "repeat"; }
 
@@ -3931,7 +4157,9 @@ class predicate_item_append : public predicate_item {
 	typedef struct { bool d1, d2, d3; } params;
 	std::map<context*, params> d;
 public:
-	predicate_item_append(bool _neg, bool _once, bool _call, int num, clause* c, interpreter* _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) { }
+	predicate_item_append(bool _neg, bool _once, bool _call, int num, clause* c, interpreter* _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) {
+		determined = false;
+	}
 
 	virtual const string get_id() { return "append"; }
 
@@ -4104,7 +4332,9 @@ class predicate_item_sublist : public predicate_item {
 	} params;
 	std::map<context*, params> d;
 public:
-	predicate_item_sublist(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) { }
+	predicate_item_sublist(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) {
+		determined = false;
+	}
 
 	virtual const string get_id() { return "sublist"; }
 
@@ -4202,7 +4432,9 @@ class predicate_item_atom_concat : public predicate_item {
 	} params;
 	std::map<context*, params> d;
 public:
-	predicate_item_atom_concat(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) { }
+	predicate_item_atom_concat(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) {
+		determined = false;
+	}
 
 	virtual const string get_id() { return "atom_concat"; }
 
@@ -5119,7 +5351,9 @@ class predicate_item_member : public predicate_item {
 	} params;
 	std::map<context*, params> d;
 public:
-	predicate_item_member(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) { }
+	predicate_item_member(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) {
+		determined = false;
+	}
 
 	virtual const string get_id() { return "member"; }
 
@@ -5187,7 +5421,9 @@ class predicate_item_for : public predicate_item {
 	} params;
 	std::map<context*, params> d;
 public:
-	predicate_item_for(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) { }
+	predicate_item_for(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) {
+		determined = false;
+	}
 
 	virtual const string get_id() { return "for"; }
 
@@ -5434,7 +5670,9 @@ public:
 
 class predicate_item_nth : public predicate_item {
 public:
-	predicate_item_nth(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) { }
+	predicate_item_nth(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) {
+		determined = false;
+	}
 
 	virtual const string get_id() { return "nth"; }
 
@@ -5569,7 +5807,9 @@ public:
 
 class predicate_item_current_predicate : public predicate_item {
 public:
-	predicate_item_current_predicate(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) { }
+	predicate_item_current_predicate(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) {
+		determined = false;
+	}
 
 	virtual const string get_id() { return "current_predicate"; }
 
@@ -5806,7 +6046,9 @@ public:
 
 class predicate_item_consult : public predicate_item {
 public:
-	predicate_item_consult(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) { }
+	predicate_item_consult(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) {
+		determined = false;
+	}
 
 	virtual const string get_id() { return "consult"; }
 
@@ -5839,7 +6081,9 @@ public:
 
 class predicate_item_open : public predicate_item {
 public:
-	predicate_item_open(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) { }
+	predicate_item_open(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) {
+		determined = false;
+	}
 
 	virtual const string get_id() { return "open"; }
 
@@ -5882,7 +6126,9 @@ public:
 
 class predicate_item_close : public predicate_item {
 public:
-	predicate_item_close(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) { }
+	predicate_item_close(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) {
+		determined = false;
+	}
 
 	virtual const string get_id() { return "close"; }
 
@@ -5915,7 +6161,9 @@ public:
 
 class predicate_item_mars : public predicate_item {
 public:
-	predicate_item_mars(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) { }
+	predicate_item_mars(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) {
+		determined = false;
+	}
 
 	virtual const string get_id() { return "mars"; }
 
@@ -6001,7 +6249,9 @@ public:
 
 class predicate_item_mars_decode : public predicate_item {
 public:
-	predicate_item_mars_decode(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) { }
+	predicate_item_mars_decode(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) {
+		determined = false;
+	}
 
 	virtual const string get_id() { return "mars_decode"; }
 
@@ -6101,7 +6351,9 @@ public:
 
 class predicate_item_unset : public predicate_item {
 public:
-	predicate_item_unset(bool _neg, bool _once, bool _call, int num, clause* c, interpreter* _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) { }
+	predicate_item_unset(bool _neg, bool _once, bool _call, int num, clause* c, interpreter* _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) {
+		determined = false;
+	}
 
 	virtual const string get_id() { return "unset"; }
 
@@ -6136,7 +6388,9 @@ public:
 
 class predicate_item_write : public predicate_item {
 public:
-	predicate_item_write(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) { }
+	predicate_item_write(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) {
+		determined = false;
+	}
 
 	virtual const string get_id() { return "write"; }
 
@@ -6208,7 +6462,9 @@ public:
 
 class predicate_item_write_term : public predicate_item {
 public:
-	predicate_item_write_term(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) { }
+	predicate_item_write_term(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) {
+		determined = false;
+	}
 
 	virtual const string get_id() { return "write_term"; }
 
@@ -6314,7 +6570,9 @@ public:
 
 class predicate_item_nl : public predicate_item {
 public:
-	predicate_item_nl(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) { }
+	predicate_item_nl(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) {
+		determined = false;
+	}
 
 	virtual const string get_id() { return "nl"; }
 
@@ -6350,7 +6608,9 @@ public:
 
 class predicate_item_file_exists : public predicate_item {
 public:
-	predicate_item_file_exists(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) { }
+	predicate_item_file_exists(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) {
+		determined = false;
+	}
 
 	virtual const string get_id() { return "file_exists"; }
 
@@ -6383,7 +6643,9 @@ public:
 
 class predicate_item_unlink : public predicate_item {
 public:
-	predicate_item_unlink(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) { }
+	predicate_item_unlink(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) {
+		determined = false;
+	}
 
 	virtual const string get_id() { return "unlink"; }
 
@@ -6417,7 +6679,9 @@ public:
 
 class predicate_item_rename_file : public predicate_item {
 public:
-	predicate_item_rename_file(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) { }
+	predicate_item_rename_file(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) {
+		determined = false;
+	}
 
 	virtual const string get_id() { return "rename_file"; }
 
@@ -6457,7 +6721,9 @@ public:
 
 class predicate_item_tell : public predicate_item {
 public:
-	predicate_item_tell(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) { }
+	predicate_item_tell(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) {
+		determined = false;
+	}
 
 	virtual const string get_id() { return "tell"; }
 
@@ -6493,7 +6759,9 @@ public:
 
 class predicate_item_see : public predicate_item {
 public:
-	predicate_item_see(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) { }
+	predicate_item_see(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) {
+		determined = false;
+	}
 
 	virtual const string get_id() { return "see"; }
 
@@ -6529,7 +6797,9 @@ public:
 
 class predicate_item_telling : public predicate_item {
 public:
-	predicate_item_telling(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) { }
+	predicate_item_telling(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) {
+		determined = false;
+	}
 
 	virtual const string get_id() { return "telling"; }
 
@@ -6565,7 +6835,9 @@ public:
 
 class predicate_item_seeing : public predicate_item {
 public:
-	predicate_item_seeing(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) { }
+	predicate_item_seeing(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) {
+		determined = false;
+	}
 
 	virtual const string get_id() { return "seeing"; }
 
@@ -6601,7 +6873,9 @@ public:
 
 class predicate_item_told : public predicate_item {
 public:
-	predicate_item_told(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) { }
+	predicate_item_told(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) {
+		determined = false;
+	}
 
 	virtual const string get_id() { return "told"; }
 
@@ -6632,7 +6906,9 @@ public:
 
 class predicate_item_seen : public predicate_item {
 public:
-	predicate_item_seen(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) { }
+	predicate_item_seen(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) {
+		determined = false;
+	}
 
 	virtual const string get_id() { return "seen"; }
 
@@ -6665,7 +6941,9 @@ class predicate_item_get_or_peek_char : public predicate_item {
 	bool peek;
 public:
 	predicate_item_get_or_peek_char(bool _peek, bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) :
-		predicate_item(_neg, _once, _call, num, c, _prolog), peek(_peek) { }
+		predicate_item(_neg, _once, _call, num, c, _prolog), peek(_peek) {
+		determined = false;
+	}
 
 	virtual const string get_id() { return peek ? "peek_char" : "get_char"; }
 
@@ -6727,7 +7005,9 @@ public:
 class predicate_item_at_end_of_stream : public predicate_item {
 public:
 	predicate_item_at_end_of_stream(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) :
-		predicate_item(_neg, _once, _call, num, c, _prolog) { }
+		predicate_item(_neg, _once, _call, num, c, _prolog) {
+		determined = false;
+	}
 
 	virtual const string get_id() { return "at_end_of_stream"; }
 
@@ -6768,7 +7048,9 @@ public:
 class predicate_item_get_code : public predicate_item {
 public:
 	predicate_item_get_code(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) :
-		predicate_item(_neg, _once, _call, num, c, _prolog) { }
+		predicate_item(_neg, _once, _call, num, c, _prolog) {
+		determined = false;
+	}
 
 	virtual const string get_id() { return "get_code"; }
 
@@ -6876,7 +7158,9 @@ public:
 
 class predicate_item_set_iteration_star_packet : public predicate_item {
 public:
-	predicate_item_set_iteration_star_packet(bool _neg, bool _once, bool _call, int num, clause* c, interpreter* _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) { }
+	predicate_item_set_iteration_star_packet(bool _neg, bool _once, bool _call, int num, clause* c, interpreter* _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) {
+		determined = false;
+	}
 
 	virtual const string get_id() { return "set_iteration_star_packet"; }
 
@@ -6905,7 +7189,9 @@ public:
 
 class predicate_item_random : public predicate_item {
 public:
-	predicate_item_random(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) { }
+	predicate_item_random(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) {
+		determined = false;
+	}
 
 	virtual const string get_id() { return "random"; }
 
@@ -6959,7 +7245,9 @@ public:
 
 class predicate_item_randomize : public predicate_item {
 public:
-	predicate_item_randomize(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) { }
+	predicate_item_randomize(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) {
+		determined = false;
+	}
 
 	virtual const string get_id() { return "randomize"; }
 
@@ -6978,6 +7266,166 @@ public:
 		srand((unsigned int)time(NULL) ^ (unsigned int)__clock());
 		result->push_back(ff);
 
+		return result;
+	}
+};
+
+class predicate_item_regularize : public predicate_item {
+public:
+	predicate_item_regularize(bool _neg, bool _once, bool _call, int num, clause* c, interpreter* _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) {
+	}
+
+	virtual const string get_id() { return "regularize"; }
+
+	virtual generated_vars* generate_variants(context* CTX, frame_item* f, vector<value*>*& positional_vals) {
+		if (positional_vals->size() != 2) {
+			std::cout << "regularize(IN,OUT): incorrect number of arguments!" << endl;
+			exit(-3);
+		}
+		generated_vars* result = new generated_vars();
+		frame_item* ff = f->copy(CTX);
+		
+		result->push_back(ff);
+
+		bool d1 = positional_vals->at(0)->defined();
+		if (!d1) {
+			std::cout << "regularize(IN,OUT) indeterminated!" << endl;
+			exit(-3);
+		}
+		term* in = dynamic_cast<term*>(positional_vals->at(0));
+		if (!in) {
+			std::cout << "regularize(IN,OUT) : IN is not a term!" << endl;
+			exit(-3);
+		}
+		vector<string> Vars;
+		size_t p = 0;
+		ITEM* r = prolog->deserialize_symbolic(in->get_name(), p, Vars);
+		string _OUT;
+		if (r)
+			r = REGULARIZE(r);
+		if (r) {
+			_OUT = prolog->serialize_symbolic(r, Vars);
+			delete r;
+		}
+		if (!_OUT.size() || !positional_vals->at(1)->unify(CTX, ff, new term(_OUT))) {
+			delete result;
+			result = NULL;
+			delete ff;
+		}
+		return result;
+	}
+};
+
+class predicate_item_to_chain : public predicate_item {
+public:
+	predicate_item_to_chain(bool _neg, bool _once, bool _call, int num, clause* c, interpreter* _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) {
+	}
+
+	virtual const string get_id() { return "to_chain"; }
+
+	virtual generated_vars* generate_variants(context* CTX, frame_item* f, vector<value*>*& positional_vals) {
+		if (positional_vals->size() != 2) {
+			std::cout << "to_chain(IN,OUT): incorrect number of arguments!" << endl;
+			exit(-3);
+		}
+		generated_vars* result = new generated_vars();
+		frame_item* ff = f->copy(CTX);
+
+		result->push_back(ff);
+
+		bool d1 = positional_vals->at(0)->defined();
+		if (!d1) {
+			std::cout << "to_chain(IN,OUT) indeterminated!" << endl;
+			exit(-3);
+		}
+		term* in = dynamic_cast<term*>(positional_vals->at(0));
+		if (!in) {
+			std::cout << "to_chain(IN,OUT) : IN is not a term!" << endl;
+			exit(-3);
+		}
+		vector<string> Vars;
+		size_t p = 0;
+		ITEM* r = prolog->deserialize_symbolic(in->get_name(), p, Vars);
+		string _OUT;
+		if (r)
+			r = SIMPLIFY(r);
+		if (r) {
+			_OUT = prolog->serialize_symbolic(r, Vars);
+			delete r;
+		}
+		if (!_OUT.size() || !positional_vals->at(1)->unify(CTX, ff, new term(_OUT))) {
+			delete result;
+			result = NULL;
+			delete ff;
+		}
+		return result;
+	}
+};
+
+class predicate_item_symop : public predicate_item {
+private:
+	string op;
+public:
+	predicate_item_symop(const string & _op, bool _neg, bool _once, bool _call, int num, clause* c, interpreter* _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) {
+		op = _op;
+	}
+
+	virtual const string get_id() { return op; }
+
+	virtual generated_vars* generate_variants(context* CTX, frame_item* f, vector<value*>*& positional_vals) {
+		if (positional_vals->size() != 3) {
+			std::cout << op << "(OP1,OP2,OUT): incorrect number of arguments!" << endl;
+			exit(-3);
+		}
+		generated_vars* result = new generated_vars();
+		frame_item* ff = f->copy(CTX);
+
+		result->push_back(ff);
+
+		bool d1 = positional_vals->at(0)->defined();
+		bool d2 = positional_vals->at(1)->defined();
+		if (!d1 || !d2) {
+			std::cout << op << "(OP1,OP2,OUT) indeterminated!" << endl;
+			exit(-3);
+		}
+		term* in1 = dynamic_cast<term*>(positional_vals->at(0));
+		term* in2 = dynamic_cast<term*>(positional_vals->at(1));
+		if (!in1 || !in2) {
+			std::cout << op << "(OP1,OP2,OUT) : OP is not a term!" << endl;
+			exit(-3);
+		}
+		vector<string> Vars;
+		size_t p = 0;
+		ITEM* r1 = prolog->deserialize_symbolic(in1->get_name(), p, Vars);
+		p = 0;
+		ITEM* r2 = prolog->deserialize_symbolic(in2->get_name(), p, Vars);
+		ITEM* r = NULL;
+		string _OUT;
+		if (r1 && r2) {
+			if (op == "add") {
+				r = r1->Add(r2);
+				r2 = NULL;
+			}
+			else if (op == "mul") {
+				r = r1->Mul(r2);
+				r2 = NULL;
+			}
+			else if (op == "div") {
+				r = r1->Div(r2);
+				r2 = NULL;
+			}
+		}
+		delete r1;
+		delete r2;
+		if (r) {
+			_OUT = prolog->serialize_symbolic(r, Vars);
+			delete r;
+		}
+		if (!_OUT.size() || !positional_vals->at(2)->unify(CTX, ff, new term(_OUT))) {
+			delete result;
+			result = NULL;
+			delete ff;
+		}
 		return result;
 	}
 };
@@ -7076,7 +7524,9 @@ public:
 class predicate_item_read_token : public predicate_item_read_token_common {
 public:
 	predicate_item_read_token(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) :
-		predicate_item_read_token_common(_neg, _once, _call, num, c, _prolog) { }
+		predicate_item_read_token_common(_neg, _once, _call, num, c, _prolog) {
+		determined = false;
+	}
 
 	virtual const string get_id() { return "read_token"; }
 
@@ -7322,6 +7772,7 @@ public:
 		this->locals_in_forked = locals;
 		this->transactable_facts = transactable_facts;
 		this->n_threads = new int_number(1);
+		determined = false;
 	}
 	virtual ~predicate_item_fork() {
 		if (n_threads)
@@ -7621,7 +8072,9 @@ public:
 
 class predicate_item_parallelize_level : public predicate_item {
 public:
-	predicate_item_parallelize_level(bool _neg, bool _once, bool _call, int num, clause* c, interpreter* _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) {}
+	predicate_item_parallelize_level(bool _neg, bool _once, bool _call, int num, clause* c, interpreter* _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) {
+		determined = false;
+	}
 
 	virtual const string get_id() { return "parallelize_level"; }
 
@@ -7665,7 +8118,9 @@ public:
 
 class predicate_item_optimize_load : public predicate_item {
 public:
-	predicate_item_optimize_load(bool _neg, bool _once, bool _call, int num, clause* c, interpreter* _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) {}
+	predicate_item_optimize_load(bool _neg, bool _once, bool _call, int num, clause* c, interpreter* _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) {
+		determined = false;
+	}
 
 	virtual const string get_id() { return "optimize_load"; }
 
@@ -7793,12 +8248,22 @@ value * interpreter::parse(context * CTX, bool exit_on_error, bool parse_complex
 				}
 			}
 			if (s[p] == 'E' || s[p] == 'e') {
+				bool neg = false;
+				if (p + 1 < s.length() && s[p + 1] == '+')
+					p++;
+				else if (p + 1 < s.length() && s[p + 1] == '-') {
+					neg = true;
+					p++;
+				}
 				flt = true;
 				p++;
 				long long n = 0;
 				while (p < s.length() && s[p] >= '0' && s[p] <= '9')
 					n = n * 10 + (long long)(s[p++] - '0');
-				v *= pow(10.0, n);
+				if (neg)
+					v *= pow(10.0, -n);
+				else
+					v *= pow(10.0, n);
 			}
 			if (flt)
 				result = new float_number(sign*v);
@@ -9504,6 +9969,21 @@ string interpreter::parse_clause(context * CTX, vector<string> & renew, frame_it
 							else if (_iid == id_randomize) {
 								pi = new predicate_item_randomize(neg, once, call, num, cl, this);
 							}
+							else if (_iid == id_regularize) {
+								pi = new predicate_item_regularize(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_add) {
+								pi = new predicate_item_symop("add", neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_mul) {
+								pi = new predicate_item_symop("mul", neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_div) {
+								pi = new predicate_item_symop("div", neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_to_chain) {
+								pi = new predicate_item_to_chain(neg, once, call, num, cl, this);
+								}
 							else if (_iid == id_char_code) {
 								pi = new predicate_item_char_code(neg, once, call, num, cl, this);
 							}
