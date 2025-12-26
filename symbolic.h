@@ -31,7 +31,7 @@ static int NPROCS = 1;
 
 static double TASK_PART = 3.0/4.0;
 
-#ifndef __LINUX__
+#ifndef __linux__
 
 #define ONE64 1ui64
 #define FULL64 0xFFui64
@@ -71,7 +71,7 @@ static double TASK_PART = 3.0/4.0;
 #endif
 
 #ifdef _OPENMP
-#if defined(__LINUX__) || _OPENMP >= 200800
+#if defined(__linux__) || _OPENMP >= 200800
 #define TASKED
 #endif
 #endif
@@ -185,7 +185,7 @@ public:
 		return var_mask[var/8] & (FULL64<<(8*(var%8)));
 	};
 
-	inline void VarMask::clear(int var) {
+	inline void clear(int var) {
 		var_mask[var/8] &= ~(FULL64<<(8*(var%8)));
 	};
 
@@ -1014,9 +1014,9 @@ ITEM* MUL::Div(ITEM* op) {
 ITEM* MUL::Pow(ITEM* op) {
 	MUL* M = dynamic_cast<MUL*>(op);
 	if (M) {
-		if (M->pows.size() != 1)
+		if (M->pows.size() != 1) {
 			THROW_EXCEPTION("Can calculate power of MUL(number) only!");
-		else {
+		} else {
 			MUL* result = dynamic_cast<MUL*>(this->clone());
 			result->pows[0] = pow(result->pows[0], M->pows[0]);
 			for (int i = 1; i < result->pows.size(); i++)
