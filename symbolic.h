@@ -299,12 +299,12 @@ public:
 
 	virtual double card();
 
-	virtual ITEM* Neg();
 	virtual void Mul(MUL * &S, bool free = true);
 	virtual void Mul(DIV * &D, bool free = true);
 	virtual void Mul(long double k);
 	virtual void Mul(int var_idx, long double pow);
 
+	virtual ITEM* Neg();
 	virtual ITEM* Add(ITEM* op);
 	virtual ITEM* Sub(ITEM* op);
 	virtual ITEM* Mul(ITEM* op);
@@ -574,7 +574,7 @@ void SUM::Mul(SUMMAND * &S, bool free) {
 		}
 		summands.clear();
 
-		unsigned seed = std::chrono::system_clock::now().time_since_epoch().count();
+		unsigned seed = (unsigned) std::chrono::system_clock::now().time_since_epoch().count();
 		std::mt19937 gen(seed);
 		std::uniform_int_distribution<int> dist(0, 1000000);
 		while (buf.size() > 0) {
@@ -1167,15 +1167,15 @@ bool MUL::IsOne() {
 };
 
 void STRIP(char * _Buf) {
-	int j = strlen(_Buf)-1;
+	size_t j = strlen(_Buf)-1;
 	while (j >= 0 && _Buf[j] == '0') j--;
 	if (j >= 0 && _Buf[j] == '.') j--;
 	_Buf[j+1] = 0x0;
 };
 
 void ESTRIP(char * _Buf) {
-	int e = strcspn(_Buf, "Ee");
-	int j = e-1;
+	size_t e = strcspn(_Buf, "Ee");
+	int j = (int)e - 1;
 	while (j >= 0 && _Buf[j] == '0') j--;
 	if (j >= 0 && _Buf[j] == '.') j--;
 	j++;
@@ -1368,7 +1368,7 @@ SUM * DIV::Divide() {
 		long long limit = 500000000LL / divisor->summands.size();
 		for (it_divisor = divisor->summands.begin(); it_divisor != divisor->summands.end(); it_divisor++) {
 			const int nThreads = 3;
-			int _best_dividend[256] = { 0 };
+			long long _best_dividend[256] = { 0 };
 			double candidate_card = 0.0;
 			double _minimal_card[256];
 			for (int i = 0; i < nThreads; i++)
@@ -1386,7 +1386,7 @@ SUM * DIV::Divide() {
 				atomic<bool> stop = false;
 				long long start = clock();
 				#pragma omp parallel for num_threads(nThreads) reduction(+:candidate_card) if(dividend_keys.end()-first > 50)
-				for (int j = first - dividend_keys.begin(); j < dividend_keys.size(); j++) {
+				for (long long j = first - dividend_keys.begin(); j < (long long)dividend_keys.size(); j++) {
 					if (!stop.load() && dividend_vals[j]) {
 						MUL* quot = dynamic_cast<MUL*>(dividend_vals[j])->CheckDiv(dynamic_cast<MUL*>(it_divisor->second));
 						if (quot) {

@@ -2,6 +2,7 @@
 #define __PROLOG_MICRO_BRAIN_H__
 
 #define _CRT_SECURE_NO_WARNINGS
+#define _HAS_STD_BYTE 0
 
 #include <vector>
 #include <string>
@@ -332,6 +333,10 @@ public:
 		id_div,
 		id_to_chain,
 		id_char_code,
+		id_nload,
+		id_nsave,
+		id_train,
+		id_sim,
 		id_get_code,
 		id_at_end_of_stream,
 		id_open_url,
@@ -446,6 +451,10 @@ public:
 		{ "div", id_div },
 		{ "to_chain", id_to_chain },
 		{ "char_code", id_char_code },
+		{ "nload", id_nload },
+		{ "nsave", id_nsave },
+		{ "train", id_train },
+		{ "sim", id_sim },
 		{ "get_code", id_get_code },
 		{ "at_end_of_stream", id_at_end_of_stream },
 		{ "open_url", id_open_url },

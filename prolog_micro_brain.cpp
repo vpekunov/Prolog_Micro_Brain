@@ -1,12 +1,14 @@
 // (C) V.V.Pekunov, Just For Fun :)
 
-// g++ -o prolog_micro_brain tinyxml2.cpp elements.cpp prolog_micro_brain.cpp -std=c++11 -O4 -lm -lboost_system -lboost_filesystem -ldl
+// g++ -o prolog_micro_brain tinyxml2.cpp elements.cpp prolog_micro_brain.cpp -fpermissive -fopenmp -std=c++17 -O4 -lm -lboost_system -lboost_filesystem -ldl
 
 #define _CRT_SECURE_NO_WARNINGS
+#define _HAS_STD_BYTE 0
 
 #pragma comment(linker, "/STACK:1000000000")
 
 #include <iostream>
+#include <iomanip>
 #include <fstream>
 #include <sstream>
 #include <map>
@@ -18,6 +20,7 @@
 #include <stack>
 #include <queue>
 #include <algorithm>
+#include <random>
 #include <functional>
 #include <chrono>
 #include <regex>
@@ -995,12 +998,12 @@ bool int_number::unify(context * CTX, frame_item * ff, value * from) {
 }
 
 class term : public value {
-private:
+protected:
 	unsigned int name;
 	vector<value *> args;
 	signed char cached_defined;
 public:
-	term(const string & _name, const int init_refs = 1) : value() {
+	term(const string& _name, const int init_refs = 1) : value() {
 		this->refs = init_refs;
 		name = atomizer.get_atom(_name);
 		cached_defined = 1;
@@ -1217,6 +1220,550 @@ public:
 			result += ")";
 		}
 		return result;
+	}
+};
+
+class network {
+private:
+	int NInputs;
+	std::string FNAME, DAT_FILE_NAME;
+	int NRows = 0;
+	int NCols = 0;
+	int NCC[512];
+	int NL;
+	int NN[1024];
+	long double best_err;
+
+	long double YN[1024][1024] = { 0.0 };
+
+	long double MMIN[512];
+	long double MMAX[512];
+	long double mmin[512];
+	long double mmax[512];
+
+	long double NUMIN, numin;
+	long double NUMAX, numax;
+
+	long double d[512];
+	long double nud;
+
+	int NW = 0;
+	int NB = 0;
+
+	long double* W = NULL;
+	long double* B = NULL;
+
+	long double tempX[512];
+
+	long double* X[512] = { NULL };
+	long double* Y = NULL;
+	long double* YS = NULL;
+	long double* ERR = NULL;
+public:
+	network(const std::string& FName, const std::string& content) {
+		FNAME = FName;
+		istringstream NET(content);
+		std::string Buf;
+		while (!NET.eof() && (Buf.size() < 3 || Buf[0] != '-' || Buf[1] != '-' || Buf[2] != '-'))
+			getline(NET, Buf);
+
+		if (NET.eof()) {
+			printf("No NET data in the NET FILE\n");
+			exit(-11);
+		}
+
+		NET >> NInputs;
+		size_t cpos1 = FNAME.rfind('\\');
+		size_t cpos2 = FNAME.rfind('/');
+		do {
+			getline(NET, DAT_FILE_NAME);
+			if (DAT_FILE_NAME.length()) {
+				if (DAT_FILE_NAME[DAT_FILE_NAME.length() - 1] == '\n')
+					DAT_FILE_NAME.resize(DAT_FILE_NAME.length() - 1);
+				if (cpos1 != string::npos || cpos2 != string::npos) {
+					size_t pos1 = DAT_FILE_NAME.rfind('\\');
+					size_t pos2 = DAT_FILE_NAME.rfind('/');
+					if (pos1 == string::npos && pos2 == string::npos) {
+						size_t pos = cpos1 == string::npos ? cpos2 : (cpos2 == string::npos ? cpos1 : max(cpos1, cpos2));
+						DAT_FILE_NAME = FNAME.substr(0, pos + 1) + DAT_FILE_NAME;
+					}
+				}
+			}
+		} while (!NET.eof() && DAT_FILE_NAME.length() == 0);
+		if (NET.eof()) {
+			printf("No DATA FILE NAME in the NET FILE\n");
+			exit(-12);
+		}
+
+		NET >> NRows;
+		NET >> NCols;
+
+		for (int i = 0; i <= NInputs; i++)
+			NET >> NCC[i];
+
+		string BUF;
+		getline(NET, BUF);
+		getline(NET, BUF);
+		getline(NET, BUF);
+		istringstream SZ(BUF);
+		int number;
+		NL = 0;
+		while (SZ >> number) {
+			NN[NL++] = number;
+		}
+
+		if (NL == 0 || NN[NL - 1] != 1) {
+			printf("In this version ONLY 1-output nets are processed\n");
+			exit(-13);
+		}
+
+		for (int i = 0; i < NL; i++) {
+			int NP = i == 0 ? NInputs : NN[i - 1];
+			NW += NP * NN[i];
+			NB += NN[i];
+		}
+
+		W = new long double[NW];
+		B = new long double[NB];
+
+		YS = new long double[NRows];
+		ERR = new long double[NRows];
+
+		NET >> best_err;
+
+		for (int i = 0; i < NInputs; i++)
+			NET >> MMIN[i];
+		for (int i = 0; i < NInputs; i++)
+			NET >> MMAX[i];
+		for (int i = 0; i < NInputs; i++)
+			NET >> mmin[i];
+		for (int i = 0; i < NInputs; i++)
+			NET >> mmax[i];
+		NET >> NUMIN;
+		NET >> NUMAX;
+		NET >> numin;
+		NET >> numax;
+
+		for (int p = 0; p < NInputs; p++) {
+			d[p] = MMAX[p] == MMIN[p] ? 1.0 : (mmax[p] - mmin[p]) / (MMAX[p] - MMIN[p]);
+		}
+
+		nud = NUMAX == NUMIN ? 1.0 : (numax - numin) / (NUMAX - NUMIN);
+
+		int ptr = 0;
+		for (int layer = 0; layer < NL; layer++) {
+			int NP = layer == 0 ? NInputs : NN[layer - 1];
+			for (int i = 0; i < NP; i++)
+				for (int j = 0; j < NN[layer]; j++, ptr++)
+					NET >> W[ptr];
+		}
+		ptr = 0;
+		for (int layer = 0; layer < NL; layer++)
+			for (int j = 0; j < NN[layer]; j++, ptr++)
+				NET >> B[ptr];
+	}
+
+	virtual const std::string & fname() { return FNAME; }
+
+	virtual void setX(unsigned int i, long double v) {
+		if (v < MMIN[i]) v = MMIN[i];
+		if (v > MMAX[i]) v = MMAX[i];
+		tempX[i] = mmin[i] + (v - MMIN[i]) * d[i];
+	}
+	
+	virtual unsigned int nX() { return NInputs; }
+
+	virtual long double sim() { return NUMIN + (NET(-1) - numin) / nud; }
+
+	virtual bool load_data() {
+		for (int i = 0; i < NInputs; i++)
+			X[i] = new long double[NRows];
+
+		Y = new long double[NRows];
+
+		ifstream DAT(DAT_FILE_NAME);
+		if (DAT) {
+			for (int i = 0; i < NRows; i++) {
+				long double VALS[1024 * 32];
+				for (int j = 0; j < NCols; j++)
+					DAT >> VALS[j];
+				for (int j = 0; j < NInputs; j++)
+					X[j][i] = mmin[j] + (VALS[NCC[j]] - MMIN[j]) * d[j];
+				Y[i] = numin + (VALS[NCC[NInputs]] - NUMIN) * nud;
+			}
+			DAT.close();
+		}
+		else {
+			printf("DAT file '%s' not found!\n", DAT_FILE_NAME.c_str());
+			exit(-17);
+		}
+
+		return NRows*NCols > 50000;
+	}
+
+	virtual void unload_data() {
+		delete[] Y;
+
+		for (int i = 0; i < NInputs; i++) {
+			delete[] X[i];
+			X[i] = NULL;
+		}
+		Y = NULL;
+	}
+
+	inline long double S(long double s) {
+		return 1.0 / (1.0 + exp(-s));
+	};
+
+	inline long double NET(int i, long double* SMIN = NULL, long double* SMAX = NULL,
+		vector<long double>* XX = NULL, vector<long double>* YY = NULL) {
+		for (int i = 0; i < NL - 1; i++)
+			memset(&YN[i], 0, NN[i] * sizeof(long double));
+		int ptr = 0;
+		if (i >= 0)
+			for (int j = 0; j < NInputs; j++)
+				for (int k = 0; k < NN[0]; k++, ptr++)
+					YN[0][k] += W[ptr] * X[j][i];
+		else
+			for (int j = 0; j < NInputs; j++)
+				for (int k = 0; k < NN[0]; k++, ptr++)
+					YN[0][k] += W[ptr] * tempX[j];
+		int ptr1 = 0;
+		for (int k = 0; k < NN[0]; k++, ptr1++) {
+			YN[0][k] += B[ptr1];
+			if (SMIN && SMAX) {
+				if (YN[0][k] < SMIN[k]) SMIN[k] = YN[0][k];
+				if (YN[0][k] > SMAX[k]) SMAX[k] = YN[0][k];
+			}
+			if (XX) XX[k].push_back(YN[0][k]);
+			YN[0][k] = S(YN[0][k]);
+			if (YY) YY[k].push_back(YN[0][k]);
+		}
+
+		for (int layer = 1; layer < NL - 1; layer++) {
+			for (int j = 0; j < NN[layer - 1]; j++)
+				for (int k = 0; k < NN[layer]; k++, ptr++)
+					YN[layer][k] += W[ptr] * YN[layer - 1][j];
+			for (int k = 0; k < NN[layer]; k++, ptr1++) {
+				YN[layer][k] += B[ptr1];
+				if (SMIN && SMAX) {
+					if (YN[layer][k] < SMIN[ptr1]) SMIN[ptr1] = YN[layer][k];
+					if (YN[layer][k] > SMAX[ptr1]) SMAX[ptr1] = YN[layer][k];
+				}
+				if (XX) XX[ptr1].push_back(YN[layer][k]);
+				YN[layer][k] = S(YN[layer][k]);
+				if (YY) YY[ptr1].push_back(YN[layer][k]);
+			}
+		}
+
+		long double res = B[ptr1];
+		for (int k = 0; k < NN[NL - 2]; k++, ptr++) {
+			res += YN[NL - 2][k] * W[ptr];
+		}
+		if (XX) XX[ptr1].push_back(res);
+		if (YY) YY[ptr1].push_back(res);
+
+		if (SMIN && SMAX) {
+			int idx = 0;
+			for (int i = 0; i < NL - 1; i++)
+				idx += NN[i];
+			if (res < SMIN[idx]) SMIN[idx] = res;
+			if (res > SMAX[idx]) SMAX[idx] = res;
+		}
+
+		return res;
+	};
+
+	virtual bool train(int MAX_EPOCHS) {
+		bool non_compact = false;
+		if (!Y) non_compact = load_data();
+
+		const double nu = 0.01;
+		const double alpha = 0.2;
+		const double tol = 1E-5;
+
+		double err = 1E300;
+
+		int epochs = 0;
+
+		long double* DW = new long double[NW];
+		memset(DW, 0, NW * sizeof(long double));
+
+		long double* DB = new long double[NB];
+		memset(DB, 0, NB * sizeof(long double));
+
+		double real_err = best_err;
+
+		vector<int> idxs(NRows);
+		for (int i = 0; i < NRows; i++)
+			idxs[i] = i;
+		auto rd = std::random_device{};
+		auto rng = std::default_random_engine{ rd() };
+		std::shuffle(idxs.begin(), idxs.end(), rng);
+
+		do {
+			err = 0.0;
+			for (int ii = 0; ii < NRows; ii++) {
+				int i = idxs[ii];
+
+				YS[i] = NET(i);
+				long double delta = YS[i] - Y[i];
+				ERR[i] = fabs(delta);
+				err += ERR[i];
+
+				DB[NB - 1] = alpha * DB[NB - 1] + (1 - alpha) * (-nu * delta);
+				B[NB - 1] += DB[NB - 1];
+
+				int ptr = NW - 1;
+				for (int k = NN[NL - 2] - 1; k >= 0; k--, ptr--) {
+					DW[ptr] = alpha * DW[ptr] + (1 - alpha) * (-nu * delta * YN[NL - 2][k]);
+					W[ptr] += DW[ptr];
+				}
+
+				long double deltas[1024] = { 0.0 };
+
+				ptr = NW - 1;
+				for (int k = NN[NL - 2] - 1; k >= 0; k--, ptr--) {
+					deltas[k] = YN[NL - 2][k] * (1.0 - YN[NL - 2][k]) * delta * W[ptr];
+				}
+
+				int ptrw = ptr;
+				int ptrb = NB - 2;
+				for (int layer = NL - 2; layer > 0; layer--) {
+					ptr = ptrw;
+					for (int j = NN[layer - 1] - 1; j >= 0; j--)
+						for (int k = NN[layer] - 1; k >= 0; k--, ptrw--) {
+							DW[ptrw] = alpha * DW[ptrw] + (1 - alpha) * (-nu * deltas[k] * YN[layer - 1][j]);
+							W[ptrw] += DW[ptrw];
+						}
+					for (int k = NN[layer] - 1; k >= 0; k--, ptrb--) {
+						DB[ptrb] = alpha * DB[ptrb] + (1 - alpha) * (-nu * deltas[k]);
+						B[ptrb] += DB[ptrb];
+					}
+
+					long double deltas1[1024] = { 0.0 };
+
+					for (int j = NN[layer - 1] - 1; j >= 0; j--)
+						for (int k = NN[layer] - 1; k >= 0; k--, ptr--) {
+							deltas1[j] += YN[layer - 1][j] * (1.0 - YN[layer - 1][j]) * deltas[k] * W[ptr];
+						}
+					for (int j = 0; j < NN[layer - 1]; j++)
+						deltas[j] = deltas1[j];
+				}
+				ptr = 0;
+				for (int j = 0; j < NInputs; j++)
+					for (int k = 0; k < NN[0]; k++, ptr++) {
+						DW[ptr] = alpha * DW[ptr] + (1 - alpha) * (-nu * deltas[k] * X[j][i]);
+						W[ptr] += DW[ptr];
+					}
+				for (int k = 0; k < NN[0]; k++) {
+					DB[k] = alpha * DB[k] + (1 - alpha) * (-nu * deltas[k]);
+					B[k] += DB[k];
+				}
+			}
+			err /= NRows;
+			if (epochs % 100 == 0) {
+				real_err = 0.0;
+				for (int i = 0; i < NRows; i++) {
+					YS[i] = NET(i);
+					long double delta = YS[i] - Y[i];
+					real_err += fabs(delta);
+				}
+				printf("%i epochs reached, err = [%lf (really = %lf) / %i] = %lf (really = %lf)\n", epochs, (double)(err * NRows), real_err, NRows, (double)err, (double)(real_err / NRows));
+				fflush(stdout);
+			}
+		} while (err > tol && epochs++ < MAX_EPOCHS);
+
+		bool result = real_err < best_err;
+
+		best_err = real_err;
+
+		delete[] DW;
+		delete[] DB;
+
+		if (non_compact) unload_data();
+
+		return result;
+	}
+
+	virtual void simplify() {
+		bool non_compact = false;
+		if (!Y) non_compact = load_data();
+
+		if (non_compact) unload_data();
+	}
+
+	virtual ~network() {
+		delete[] W;
+		delete[] B;
+		delete[] Y;
+		delete[] YS;
+		delete[] ERR;
+
+		for (int i = 0; i < NInputs; i++)
+			delete[] X[i];
+	}
+
+	virtual bool equals(network* from) {
+		if (NInputs != from->NInputs) return false;
+		if (DAT_FILE_NAME != from->DAT_FILE_NAME) return false;
+		if (NRows != from->NRows) return false;
+		if (NCols != from->NCols) return false;
+		for (int i = 0; i < NCols; i++)
+			if (NCC[i] != from->NCC[i])
+				return false;
+		if (NL != from->NL) return false;
+		for (int i = 0; i < NL; i++)
+			if (NN[i] != from->NN[i])
+				return false;
+		if (best_err != from->best_err) return false;
+		for (int i = 0; i < NInputs; i++) {
+			if (MMIN[i] != from->MMIN[i]) return false;
+			if (MMAX[i] != from->MMAX[i]) return false;
+			if (mmin[i] != from->mmin[i]) return false;
+			if (mmax[i] != from->mmax[i]) return false;
+		}
+
+		if (NUMIN != from->NUMIN || numin != from->numin ||
+			NUMAX != from->NUMAX || numax != from->numax) return false;
+
+		if (NW != from->NW || NB != from->NB) return false;
+		for (int i = 0; i < NW; i++)
+			if (W[i] != from->W[i])
+				return false;
+		for (int i = 0; i < NB; i++)
+			if (B[i] != from->B[i])
+				return false;
+
+		return true;
+	}
+
+	const string get() {
+		ostringstream NET;
+
+		NET << "Net file after additional training by the nnets_simplify\n";
+		NET << "-------------------------------------------------------\n";
+
+		NET << NInputs << "\n\n";
+		NET << DAT_FILE_NAME << "\n\n";
+
+		NET << NRows << " " << NCols << "\n\n";
+
+		for (int i = 0; i <= NInputs; i++)
+			NET << NCC[i] << " ";
+		NET << "\n\n";
+
+		for (int i = 0; i < NL; i++)
+			NET << NN[i] << " ";
+		NET << "\n\n";
+
+		NET << setprecision(15) << best_err << "\n\n";
+		for (int i = 0; i < NInputs; i++)
+			NET << setprecision(15) << MMIN[i] << " ";
+		NET << "\n";
+		for (int i = 0; i < NInputs; i++)
+			NET << setprecision(15) << MMAX[i] << " ";
+		NET << "\n\n";
+		for (int i = 0; i < NInputs; i++)
+			NET << setprecision(15) << mmin[i] << " ";
+		NET << "\n";
+		for (int i = 0; i < NInputs; i++)
+			NET << setprecision(15) << mmax[i] << " ";
+		NET << "\n\n";
+		NET << setprecision(15) << NUMIN << "\n";
+		NET << setprecision(15) << NUMAX << "\n\n";
+		NET << setprecision(15) << numin << "\n";
+		NET << setprecision(15) << numax << "\n\n";
+		int ptr = 0;
+		for (int layer = 0; layer < NL; layer++) {
+			int NP = layer == 0 ? NInputs : NN[layer - 1];
+			for (int i = 0; i < NP; i++) {
+				for (int j = 0; j < NN[layer]; j++, ptr++)
+					NET << setprecision(15) << W[ptr] << " ";
+				NET << "\n";
+			}
+			NET << "\n";
+		}
+		ptr = 0;
+		for (int layer = 0; layer < NL; layer++) {
+			for (int j = 0; j < NN[layer]; j++, ptr++)
+				NET << setprecision(15) << B[ptr] << " ";
+			NET << "\n\n";
+		}
+
+		return NET.str();
+	}
+};
+
+class nnet : public term {
+private:
+	network* net;
+public:
+	nnet() : term("nnet", 1) {
+		net = NULL;
+	}
+
+	nnet(const nnet& src) : term("nnet", 1) {
+		string content = src.net->get();
+		this->args.push_back(new ::term(content));
+		net = new network(src.net->fname(), content);
+	}
+
+	nnet(network* src) : term("nnet", 1) {
+		string content = src->get();
+		this->args.push_back(new ::term(content));
+		net = new network(src->fname(), content);
+	}
+
+	nnet(const std::string & fname, ifstream & in) : term("nnet") {
+		string content;
+		in.seekg(0, std::ios::end);
+		content.reserve(in.tellg());
+		in.seekg(0, std::ios::beg);
+
+		content.assign((std::istreambuf_iterator<char>(in)),
+			std::istreambuf_iterator<char>());
+		this->args.push_back(new ::term(content));
+		net = new network(fname, content);
+	}
+
+	virtual ~nnet() { delete net; }
+
+	virtual void free() {
+		refs--;
+		if (refs == 0)
+			delete this;
+	}
+
+	virtual const string get_content() { return net->get(); }
+
+	virtual bool train(int MAX_EPOCHS) { return net->train(MAX_EPOCHS); }
+
+	virtual long double sim() { return net->sim(); }
+	virtual unsigned int nX() { return net->nX(); }
+	virtual void setX(unsigned int i, long double v) { net->setX(i, v); }
+
+	virtual value* copy(context* CTX, frame_item* f, int unwind = 0) {
+		return new nnet(*this);;
+	}
+
+	virtual void add_arg(context* CTX, frame_item* f, value* v, int unwind = 0) {
+		term::add_arg(CTX, f, v, unwind);
+		term* arg = dynamic_cast<term*>(v);
+		if (args.size() > 1 || !v) {
+			cout << "nnet(arg) must has one term arg only!";
+			exit(1001);
+		}
+		net = new network("", arg->get_name());
+	}
+
+	virtual bool unify(context* CTX, frame_item* ff, value* from) {
+		cached_defined = -1;
+		if (dynamic_cast<nnet*>(from)) {
+			return net->equals(dynamic_cast<nnet*>(from)->net);
+		}
+		else
+			return term::unify(CTX, ff, from);
 	}
 };
 
@@ -2646,7 +3193,7 @@ SUM * interpreter::deserialize_symbolic(const string& expression, size_t& p, vec
 					exit(110);
 				}
 				v = new MUL(1.0);
-				v->Mul(it - Vars.begin(), 1.0);
+				v->Mul((int)(it - Vars.begin()), 1.0);
 			}
 			vals.push(v);
 			postfix.pop();
@@ -7430,6 +7977,200 @@ public:
 	}
 };
 
+class predicate_item_nload : public predicate_item {
+public:
+	predicate_item_nload(bool _neg, bool _once, bool _call, int num, clause* c, interpreter* _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) {
+		determined = false;
+	}
+
+	virtual const string get_id() { return "nload"; }
+
+	virtual int is_not_pure(std::set<string>* work_set) {
+		work_set->insert(get_id());
+		return 1;
+	}
+
+	virtual generated_vars* generate_variants(context* CTX, frame_item* f, vector<value*>*& positional_vals) {
+		if (positional_vals->size() != 2) {
+			std::cout << "nload(FName,NET): incorrect number of arguments!" << endl;
+			exit(-3);
+		}
+		generated_vars* result = new generated_vars();
+		frame_item* ff = f->copy(CTX);
+
+		result->push_back(ff);
+
+		bool d1 = positional_vals->at(0)->defined();
+		if (!d1) {
+			std::cout << "nload(FName,NET) indeterminated!" << endl;
+			exit(-3);
+		}
+		term* in = dynamic_cast<term*>(positional_vals->at(0));
+		if (!in) {
+			std::cout << "nload(FName,NET) : FName is not a term!" << endl;
+			exit(-3);
+		}
+		ifstream _IN(in->get_name());
+		nnet* v = new nnet(in->get_name(), _IN);
+		if (!_IN || !positional_vals->at(1)->unify(CTX, ff, v)) {
+			delete result;
+			result = NULL;
+			delete ff;
+		}
+		if (v) v->free();
+		if (_IN)
+			_IN.close();
+		return result;
+	}
+};
+
+class predicate_item_nsave : public predicate_item {
+public:
+	predicate_item_nsave(bool _neg, bool _once, bool _call, int num, clause* c, interpreter* _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) {
+		determined = false;
+	}
+
+	virtual const string get_id() { return "nsave"; }
+
+	virtual int is_not_pure(std::set<string>* work_set) {
+		work_set->insert(get_id());
+		return 1;
+	}
+
+	virtual generated_vars* generate_variants(context* CTX, frame_item* f, vector<value*>*& positional_vals) {
+		if (positional_vals->size() != 2) {
+			std::cout << "nsave(NET,FName): incorrect number of arguments!" << endl;
+			exit(-3);
+		}
+		generated_vars* result = new generated_vars();
+		frame_item* ff = f->copy(CTX);
+
+		result->push_back(ff);
+
+		bool d1 = positional_vals->at(0)->defined();
+		bool d2 = positional_vals->at(1)->defined();
+		if (!d1 || !d2) {
+			std::cout << "nsave(NET,FName) indeterminated!" << endl;
+			exit(-3);
+		}
+		term* out = dynamic_cast<term*>(positional_vals->at(1));
+		if (!out) {
+			std::cout << "nsave(NET,FName) : FName is not a term!" << endl;
+			exit(-3);
+		}
+		nnet* net = dynamic_cast<nnet*>(positional_vals->at(0));
+		if (!net) {
+			std::cout << "nsave(NET,FName) : NET is not a neural network!" << endl;
+			exit(-3);
+		}
+		ofstream _OUT(out->get_name(), std::ios_base::trunc);
+		if (!_OUT) {
+			delete result;
+			result = NULL;
+			delete ff;
+		}
+		else
+			_OUT << net->get_content();
+		if (_OUT)
+			_OUT.close();
+		return result;
+	}
+};
+
+class predicate_item_train : public predicate_item {
+public:
+	predicate_item_train(bool _neg, bool _once, bool _call, int num, clause* c, interpreter* _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) {
+		determined = false;
+	}
+
+	virtual const string get_id() { return "train"; }
+
+	virtual generated_vars* generate_variants(context* CTX, frame_item* f, vector<value*>*& positional_vals) {
+		if (positional_vals->size() != 3) {
+			std::cout << "train(NET,MAX_EPOCHS,NET): incorrect number of arguments!" << endl;
+			exit(-3);
+		}
+		generated_vars* result = new generated_vars();
+		frame_item* ff = f->copy(CTX);
+
+		result->push_back(ff);
+
+		bool d1 = positional_vals->at(0)->defined();
+		bool d2 = positional_vals->at(1)->defined();
+		if (!d1 || !d2) {
+			std::cout << "train(NET,MAX_EPOCHS,NET) indeterminated!" << endl;
+			exit(-3);
+		}
+		nnet* in = dynamic_cast<nnet*>(positional_vals->at(0));
+		int_number* n = dynamic_cast<int_number*>(positional_vals->at(1));
+		nnet* out = in ? new nnet(*in) : NULL;
+		if (!in || !n || !out || !out->train((int)(0.5 + n->get_value())) || !positional_vals->at(2)->unify(CTX, ff, out)) {
+			delete result;
+			result = NULL;
+			delete ff;
+		}
+		if (out) out->free();
+		return result;
+	}
+};
+
+class predicate_item_sim : public predicate_item {
+public:
+	predicate_item_sim(bool _neg, bool _once, bool _call, int num, clause* c, interpreter* _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) {
+	}
+
+	virtual const string get_id() { return "sim"; }
+
+	virtual generated_vars* generate_variants(context* CTX, frame_item* f, vector<value*>*& positional_vals) {
+		if (positional_vals->size() != 3) {
+			std::cout << "sim(NET,[X1,...,XN],Out): incorrect number of arguments!" << endl;
+			exit(-3);
+		}
+		generated_vars* result = new generated_vars();
+		frame_item* ff = f->copy(CTX);
+
+		result->push_back(ff);
+
+		bool d1 = positional_vals->at(0)->defined();
+		bool d2 = positional_vals->at(1)->defined();
+		if (!d1 || !d2) {
+			std::cout << "sim(NET,[X1,...,XN],Out) indeterminated!" << endl;
+			exit(-3);
+		}
+		nnet* in = dynamic_cast<nnet*>(positional_vals->at(0));
+		::list* x = dynamic_cast<::list*>(positional_vals->at(1));
+		if (x) {
+			if (x->size() == in->nX()) {
+				int i = 0;
+				x->iterate([&](value* v) {
+					float_number* val = dynamic_cast<float_number*>(v);
+					int_number* ival = dynamic_cast<int_number*>(v);
+					if (val) {
+						in->setX(i++, val->get_value());
+					}
+					else if (ival) {
+						in->setX(i++, ival->get_value());
+					}
+				});
+				if (x->size() != i)
+					x = NULL;
+			}
+			else
+			{
+				x = NULL;
+			}
+		}
+		float_number* out = x ? new float_number(in->sim()) : NULL;
+		if (!x || !in || !out || !positional_vals->at(2)->unify(CTX, ff, out)) {
+			delete result;
+			result = NULL;
+			delete ff;
+		}
+		if (out) out->free();
+		return result;
+	}
+};
+
 class predicate_item_read_token_common : public predicate_item {
 public:
 	predicate_item_read_token_common(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) :
@@ -8392,9 +9133,11 @@ value * interpreter::parse(context * CTX, bool exit_on_error, bool parse_complex
 			if (n >= 0)
 				result = new indicator(st, n);
 			else {
-				result = new term(st);
-
 				if (parse_complex_terms && s[p] == '(') {
+					if (st == "nnet")
+						result = new nnet();
+					else
+						result = new term(st);
 					p++;
 					size_t oldp = p;
 					bypass_spaces(s, p);
@@ -8407,6 +9150,10 @@ value * interpreter::parse(context * CTX, bool exit_on_error, bool parse_complex
 							}
 							else
 								return NULL;
+						}
+						if (dynamic_cast<nnet*>(result) && dynamic_cast<nnet*>(result)->get_args().size()) {
+							std::cout << "(" << s.substr(oldp, (size_t)(p - oldp)) << ") : nnet has more than one arg!" << endl;
+							exit(-1);
 						}
 						((term *)result)->add_arg(CTX, ff, v);
 						v->free();
@@ -8429,7 +9176,8 @@ value * interpreter::parse(context * CTX, bool exit_on_error, bool parse_complex
 						}
 					}
 					p++;
-				}
+				} else
+					result = new term(st);
 			}
 		}
 
@@ -9983,6 +10731,18 @@ string interpreter::parse_clause(context * CTX, vector<string> & renew, frame_it
 							}
 							else if (_iid == id_to_chain) {
 								pi = new predicate_item_to_chain(neg, once, call, num, cl, this);
+								}
+							else if (_iid == id_nload) {
+									pi = new predicate_item_nload(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_nsave) {
+								pi = new predicate_item_nsave(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_train) {
+								pi = new predicate_item_train(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_sim) {
+								pi = new predicate_item_sim(neg, once, call, num, cl, this);
 								}
 							else if (_iid == id_char_code) {
 								pi = new predicate_item_char_code(neg, once, call, num, cl, this);
