@@ -1226,8 +1226,14 @@ public:
 	virtual frame_item * get_next_variant(context * CTX, int i) { return i < size() ? at(i) : NULL; }
 
 	virtual void undo(int _i, vector<frame_item*>* list) {
-		at(_i) = NULL;
+		if (!list || list->size())
+			at(_i) = NULL;
+		if (list)
+			for (int j = 0; j < list->size(); j++)
+				if ((size_t)(_i + j + 1) < size())
+					at((size_t)(_i + j + 1)) = list->at(j);
 	}
+
 
 	virtual void delete_from(int i) {
 		for (int j = i; j < size(); j++)

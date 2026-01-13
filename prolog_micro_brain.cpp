@@ -3274,13 +3274,6 @@ public:
 		return result;
 	}
 
-	virtual void undo(int _i, vector<frame_item*>* list) {
-		if (list->size())
-			generated_vars::undo(_i, list);
-		for (int j = 0; j < list->size(); j++)
-			at((size_t)(_i + j + 1)) = list->at(j);
-	}
-
 	virtual void delete_from(int k) {
 		for (int i = k; i < size(); i++) {
 			delete this->at(i);

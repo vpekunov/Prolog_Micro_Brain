@@ -92,3 +92,14 @@
 - atom_hexs
 - page_id
 - unset
+- add
+- mul
+- div
+- regularize
+- to_chain
+- nload
+- nsave
+- train
+- sim
+- optimize_load
+- parallelize_level
