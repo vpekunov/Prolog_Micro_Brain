@@ -1259,6 +1259,25 @@ private:
 	long double* Y = NULL;
 	long double* YS = NULL;
 	long double* ERR = NULL;
+
+	typedef struct {
+		int kind;
+		int N;
+		long double* KF;
+	} VARIANT;
+
+	const int HOW_MANY = 5;
+
+	const int _div = 20;
+
+	const int maxN = 4;
+
+	const static int n_kinds = 5;
+
+	typedef enum { vkPoly = 0, vkPolySqr = 1, vkPolyRev = 2, vkPolySqrRev = 3, vkLinear = 4 } variant_kinds;
+
+	const char* kinds[n_kinds] = { "POLY", "POLYSQR", "POLYREV", "POLYSQRREV", "LIN" };
+
 public:
 	network(const std::string& FName, const std::string& content) {
 		FNAME = FName;
@@ -1586,11 +1605,91 @@ public:
 		return result;
 	}
 
-	virtual void simplify() {
+	virtual vector<std::string> simplify(bool to_chain) {
 		bool non_compact = false;
 		if (!Y) non_compact = load_data();
 
+		long double err = 0.0;
+		for (int i = 0; i < NRows; i++) {
+			YS[i] = NET(i);
+
+			long double delta = YS[i] - Y[i];
+			ERR[i] = fabs(delta);
+			err += ERR[i];
+		}
+		err /= NRows;
+
+		long double err1 = err * NRows;
+
+		long double tol_err = err1 * 1.05;
+
+		bool enhanced = true;
+		do {
+			long double min_delta = 1E300;
+			int min_n_w = -1;
+			for (int j = 0; j < NW; j++)
+				if (fabs(W[j]) >= 1e-14) {
+					long double save = W[j];
+					W[j] = 0.0;
+					long double err2 = 0.0;
+					for (int i = 0; i < NRows; i++)
+						err2 += fabs(Y[i] - NET(i));
+					if (err2 - err1 < min_delta) {
+						min_delta = err2 - err1;
+						min_n_w = j;
+					}
+					W[j] = save;
+				}
+
+			if (min_n_w >= 0 && err1 + min_delta < tol_err) {
+				W[min_n_w] = 0.0;
+				int k = min_n_w;
+				int layer = 1;
+				while (layer <= NL) {
+					int NP = layer == 1 ? NInputs : NN[layer - 2];
+					if (k < NP * NN[layer - 1])
+						break;
+					k -= NP * NN[layer - 1];
+					layer++;
+				}
+				printf("AT ERROR(%lf to %lf) WEIGHT in %i layer (%i-%i) is excluded\n",
+					(double)err1, (double)(err1 + min_delta),
+					layer,
+					k / NN[layer - 1],
+					k % NN[layer - 1]
+				);
+				fflush(stdout);
+			}
+			else
+				enhanced = false;
+		} while (enhanced);
+
+		long double * SMIN = new long double[NB];
+		long double * SMAX = new long double[NB];
+		int* SFREQ = new int[NB * _div];
+		memset(SFREQ, 0, NB * _div * sizeof(int));
+		for (int j = 0; j < NB; j++) {
+			SMIN[j] = 1E300;
+			SMAX[j] = -1E300;
+		}
+
+		vector<long double> * XX = new vector<long double>[NB];
+		vector<long double> * YY = new vector<long double>[NB];
+		for (int i = 0; i < NRows; i++)
+			NET(i, SMIN, SMAX, XX, YY);
+
+		int NVARIANTS = HOW_MANY;
+		vector<std::string> result = ANALYZE(omp_get_num_procs(), NVARIANTS, to_chain, SMIN, SMAX, SFREQ, XX, YY);
+
+		delete[] XX;
+		delete[] YY;
+
+		delete[] SMIN;
+		delete[] SMAX;
+
 		if (non_compact) unload_data();
+
+		return result;
 	}
 
 	virtual ~network() {
@@ -1693,6 +1792,545 @@ public:
 
 		return NET.str();
 	}
+
+	/* LU - разложение  с выбором максимального элемента по диагонали */
+	bool _GetLU(int NN, int* iRow, long double* A, long double* LU)
+	{
+		int i, j, k;
+		try {
+			memmove(LU, A, NN * NN * sizeof(long double));
+			for (i = 0; i < NN; i++)
+				iRow[i] = i;
+			for (i = 0; i < NN - 1; i++)
+			{
+				long double Big = fabs(LU[iRow[i] * NN + i]);
+				int iBig = i;
+
+				long double Kf;
+
+				for (j = i + 1; j < NN; j++)
+				{
+					long double size = fabs(LU[iRow[j] * NN + i]);
+
+					if (size > Big)
+					{
+						Big = size;
+						iBig = j;
+					}
+				}
+				if (iBig != i)
+				{
+					int V = iRow[i];
+					iRow[i] = iRow[iBig];
+					iRow[iBig] = V;
+				}
+				Kf = 1.0 / LU[iRow[i] * NN + i];
+
+				LU[iRow[i] * NN + i] = Kf;
+				for (j = i + 1; j < NN; j++)
+				{
+					long double Fact = Kf * LU[iRow[j] * NN + i];
+
+					LU[iRow[j] * NN + i] = Fact;
+					for (k = i + 1; k < NN; k++)
+						LU[iRow[j] * NN + k] -= Fact * LU[iRow[i] * NN + k];
+				}
+			}
+			LU[(iRow[NN - 1] + 1) * NN - 1] = 1.0 / LU[(iRow[NN - 1] + 1) * NN - 1];
+		}
+		catch (...) {
+			return false;
+		}
+		return true;
+	}
+
+	/* Метод LU - разложения */
+	bool _SolveLU(int NN, int* iRow, long double* LU, long double* Y, long double* X)
+	{
+		int i, j, k;
+		try {
+			X[0] = Y[iRow[0]];
+			for (i = 1; i < NN; i++)
+			{
+				long double V = Y[iRow[i]];
+
+				for (j = 0; j < i; j++)
+					V -= LU[iRow[i] * NN + j] * X[j];
+				X[i] = V;
+			}
+
+			X[NN - 1] *= LU[(iRow[NN - 1] + 1) * NN - 1];
+
+			for (i = 1, j = NN - 2; i < NN; i++, j--)
+			{
+				long double V = X[j];
+
+				for (k = j + 1; k < NN; k++)
+					V -= LU[iRow[j] * NN + k] * X[k];
+				X[j] = V * LU[iRow[j] * NN + j];
+			}
+		}
+		catch (...) {
+			return false;
+		}
+		return true;
+	}
+
+	long double* MNK_of_X(int N,
+		const vector<long double> W,
+		const vector<long double> X,
+		const vector<long double> Y,
+		double& err) {
+		int Z = (int) X.size();
+		vector<long double> _XP(Z, 1.0);
+		long double* A = new long double[N * N];
+		long double* LU = new long double[N * N];
+		long double* B = new long double[N];
+		long double* XX = new long double[N];
+		int* iLU = new int[N];
+		int i, j, k;
+
+		for (i = 0; i < 2 * N - 1; i++) {
+			long double QX = 0.0;
+			long double QY = 0.0;
+			for (j = 0; j < Z; j++) {
+				QX += W[j] * _XP[j];
+				if (i < N) QY += W[j] * _XP[j] * Y[j];
+				_XP[j] *= X[j];
+			}
+			for (j = (i < N ? i : N - 1), k = (i < N ? 0 : i - N + 1); j >= 0 && k < N; j--, k++)
+				A[k * N + j] = QX;
+			if (i < N) B[i] = QY;
+		}
+		long double ZZ = 0.0;
+		if (!(_GetLU(N, iLU, A, LU) && _SolveLU(N, iLU, LU, B, XX))) {
+			memset(XX, 0, N * sizeof(long double));
+			err = 1E300;
+		}
+		else {
+			for (k = 0; k < N; k++)
+				if (_isnan(XX[k])) {
+					memset(XX, 0, N * sizeof(long double));
+					err = 1E300;
+					return XX;
+				}
+			err = 0.0;
+			for (j = 0; j < Z; j++) {
+				long double R = 0.0;
+				for (k = N - 1; k >= 0; k--)
+					R = R * X[j] + XX[k];
+				double cur_err = fabs(R - Y[j]);
+				err += W[j] * cur_err;
+				ZZ += W[j];
+			}
+		}
+
+		delete[] A;
+		delete[] LU;
+		delete[] B;
+		delete[] iLU;
+
+		if (ZZ > 0.0) err /= ZZ;
+
+		return XX;
+	}
+
+	typedef map<string, ITEM*> zVars;
+
+	void* BUILD_FUNC(int NPP, int& NVARIANTS, bool Simplify,
+		vector<string>& BEST,
+		char** Vars,
+		vector<vector<VARIANT>*>_VARS,
+		int layer, zVars& zvars, string* Scheme = NULL, SUM** Inputs = NULL) {
+
+		int n_input[64] = { 0 };
+		int n_output[64] = { 0 };
+		int w_base[64] = { 0 };
+		int b_base[64] = { 0 };
+
+		for (int nlayer = 0; nlayer < NL; nlayer++) {
+			n_input[nlayer] = nlayer == 0 ? NInputs : NN[nlayer - 1];
+			n_output[nlayer] = NN[nlayer];
+			if (nlayer > 0) {
+				w_base[nlayer] = w_base[nlayer - 1] + n_input[nlayer - 1] * n_output[nlayer - 1];
+				b_base[nlayer] = b_base[nlayer - 1] + n_output[nlayer - 1];
+			}
+		}
+
+		SUM* INPUTS[256] = { NULL };
+		SUM* OUTPUTS[256] = { NULL };
+
+		if (!Scheme) {
+			Scheme = new string("");
+		}
+
+		string* _Scheme = new string(*Scheme);
+
+		for (int i = 0; i < n_input[layer - 1]; i++)
+			if (layer == 1) {
+				MUL* INP = new MUL(1.0);
+				INP->Mul(i, 1.0);
+				INPUTS[i] = new SUM(INP);
+			}
+			else
+				INPUTS[i] = dynamic_cast<SUM*>(Inputs[i]->clone());
+
+		for (int i = 0; i < n_output[layer - 1]; i++) {
+			OUTPUTS[i] = new SUM(B[b_base[layer - 1] + i]);
+			for (int j = 0; j < n_input[layer - 1]; j++) {
+				SUM* KFI = new SUM(W[w_base[layer - 1] + j * n_output[layer - 1] + i]);
+				SUM* I = dynamic_cast<SUM*>(INPUTS[j]->clone());
+				KFI->Mul(I);
+				OUTPUTS[i]->Add(KFI);
+			}
+			OUTPUTS[i]->AccountSimilars();
+		}
+
+		int N = 1;
+		unsigned int variant[256] = { 0 };
+		for (int i = 0; i < n_output[layer - 1]; i++)
+			N *= (int) _VARS[b_base[layer - 1] + i]->size();
+		for (int i = 0; i < N && NVARIANTS; i++) {
+			int P = n_output[layer - 1];
+			if (layer == 1) {
+				*_Scheme = "|";
+				zVars::iterator it;
+				for (it = zvars.begin(); it != zvars.end(); it++)
+					delete it->second;
+				zvars.clear();
+			}
+			else
+				*_Scheme = *Scheme;
+
+			SUM* _OUTPUTS[256] = { NULL };
+			for (int j = 0; j < P; j++) {
+				int neuro_num = b_base[layer - 1] + j;
+				int sqrt_var = NInputs + neuro_num;
+				VARIANT& VAR = (*_VARS[b_base[layer - 1] + j])[variant[j]];
+				SUM* ARG = dynamic_cast<SUM*>(OUTPUTS[j]->clone());
+				char sqrt_name[4] = "z00";
+				sqrt_name[1] = neuro_num >= 10 ? '0' + neuro_num / 10 : '0';
+				sqrt_name[2] = '0' + neuro_num % 10;
+				string zvar(sqrt_name);
+				zvars[zvar] = ARG->clone();
+				_OUTPUTS[j] = new SUM(0.0);
+				*_Scheme += kinds[VAR.kind];
+				*_Scheme += "|";
+				switch (VAR.kind) {
+				case vkPoly:
+				case vkPolyRev:
+					_OUTPUTS[j]->SETPOLY(ARG, VAR.N, VAR.KF, VAR.kind == vkPolyRev);
+					break;
+				case vkPolySqr:
+				case vkPolySqrRev:
+					_OUTPUTS[j]->SETPOLYSQR(ARG, sqrt_var, VAR.N, VAR.KF, VAR.kind == vkPolySqrRev);
+					break;
+				case vkLinear:
+					delete _OUTPUTS[j];
+					_OUTPUTS[j] = ARG;
+					_OUTPUTS[j]->AccountSimilars();
+				}
+			}
+
+			if (layer < NL) {
+				BUILD_FUNC(NPP, NVARIANTS, Simplify, BEST, Vars, _VARS, layer + 1, zvars, _Scheme, _OUTPUTS);
+			}
+			else {
+				if (NVARIANTS > 0) {
+					NVARIANTS--;
+					ITEM* _OUT = dynamic_cast<ITEM*>(_OUTPUTS[0]->clone());
+#ifdef TASKED
+					string* SCHEME = new string("");
+					zVars* _zvars = new zVars();
+					_zvars->insert(zvars.begin(), zvars.end());
+					for (zVars::iterator z_it = _zvars->begin(); z_it != _zvars->end(); z_it++) {
+						z_it->second = z_it->second->clone();
+					}
+					*SCHEME = *_Scheme;
+#pragma omp task if((int)(NPP*TASK_PART) > 1) untied
+					{
+#else
+					string* SCHEME = new string("");
+					zVars* _zvars = &zvars;
+					*SCHEME = *_Scheme;
+#endif
+					int maxPows[256] = { 0 };
+					zVars::iterator _z_last = _zvars->end();
+					zVars::iterator z_it;
+					// The last layer is LINEAR. z[last] is not considered (= OUT)
+					_z_last--;
+					for (z_it = _zvars->begin(); z_it != _z_last; z_it++) {
+						do {
+							ITEM* z__S = SUBSTITUTE_SQRS(z_it->second, NInputs, Vars, *_zvars);
+							if (Simplify)
+								z_it->second = SIMPLIFY(z__S);
+							else
+								z_it->second = z__S;
+						} while (PRESENT_SQRS(z_it->second, NInputs));
+					}
+					printf("SIMPLIFIED\n");
+					string* Buf = new string("");
+					ITEM* _S = _OUT;
+					do {
+						ITEM* __S = SUBSTITUTE_SQRS(_S, NInputs, Vars, *_zvars);
+						if (Simplify)
+							_S = SIMPLIFY(__S);
+						else
+							_S = __S;
+						printf("Stage OK ");
+					} while (PRESENT_SQRS(_S, NInputs));
+					printf("\n");
+					string SNET;
+					SNET.reserve(128 * 1024 * 1024);
+					_S->sprint(Vars, maxPows, &SNET);
+					SNET += "\n";
+					unsigned long long used_mask = 0;
+					_S->CHECK_VARS(used_mask, NInputs, Vars, *_zvars);
+					unsigned long long k = ONE64;
+					for (int pv = 0; pv < NInputs; pv++) {
+						if (used_mask & k) {
+							string _DEF = Vars[pv];
+							for (int ppv = 2; ppv <= maxPows[pv]; ppv++) {
+								_DEF += "*";
+								_DEF += Vars[pv];
+								string CUR = Vars[pv];
+								char Num[32] = "";
+								_sprintf1(Num, 32, "%u", ppv);
+								CUR += Num;
+								*Buf += CUR;
+								*Buf += "=";
+								*Buf += _DEF;
+								_DEF = CUR;
+								*Buf += "\n";
+							}
+						}
+						k <<= 1;
+					}
+					// The last layer is LINEAR. z[last] is not considered (= OUT)
+					for (z_it = _zvars->begin(); z_it != _z_last; z_it++, k <<= 1)
+						if (used_mask & k) {
+							ITEM* z_S = z_it->second;
+							string* zBuf = new string("");
+							zBuf->reserve(32 * 1024 * 1024);
+							z_S->sprint(Vars, maxPows, zBuf);
+							*Buf += z_it->first.c_str();
+							*Buf += " = sqrt(";
+							*Buf += *zBuf;
+							*Buf += ")\n";
+							delete zBuf;
+						}
+					delete _S;
+					// printf("%s NET<%s> : %s\n", Buf->c_str(), SCHEME->c_str(), SNET.c_str());
+#pragma omp critical
+					{
+						string STR = *Buf;
+						STR += "NET<";
+						STR += *SCHEME;
+						STR += "> : ";
+						STR += SNET;
+
+						size_t L = STR.length();
+						vector<string>::iterator after = BEST.begin();
+						while (after != BEST.end() && after->length() < L) after++;
+						BEST.insert(after, STR);
+						if (BEST.size() > HOW_MANY) BEST.pop_back();
+					}
+					delete Buf;
+#ifdef TASKED
+					_z_last++;
+					for (z_it = _zvars->begin(); z_it != _z_last; z_it++) {
+						delete z_it->second;
+					}
+					delete _zvars;
+					delete SCHEME;
+					}
+#endif
+				}
+			}
+
+		variant[0]++;
+		for (int j = 0; j < P && variant[j] >= _VARS[b_base[layer - 1] + j]->size(); j++) {
+			variant[j] = 0;
+			if (j < P - 1) variant[j + 1]++;
+		}
+
+		for (int j = 0; j < P; j++)
+			delete _OUTPUTS[j];
+		}
+
+		for (int i = 0; i < n_input[layer - 1]; i++)
+			delete INPUTS[i];
+		for (int i = 0; i < n_output[layer - 1]; i++)
+			delete OUTPUTS[i];
+
+		if (layer == 1 && !Scheme)
+			delete Scheme;
+
+		delete _Scheme;
+
+		if (layer == 1) {
+			zVars::iterator it;
+			for (it = zvars.begin(); it != zvars.end(); it++)
+				delete it->second;
+			zvars.clear();
+		}
+
+		return NULL;
+	};
+
+	vector<string> ANALYZE(int NPP, int & NVARIANTS, bool Simplify,
+		long double* SMIN, long double* SMAX, int* SFREQ,
+		vector<long double> XX[], vector<long double> YY[]) {
+
+		double start_time = omp_get_wtime();
+
+		vector<vector<VARIANT>*> _VARS(NB);
+
+		const long double eps_stand = 1E-2;
+		const long double eps_min = 1E-3;
+
+		int nk[2] = { 0, 0 };
+		int ns[n_kinds - 1] = { 0, 0, 1, 1 };
+		long double tols[2] = { eps_stand, eps_stand };
+		int base = 0;
+
+		for (int layer = 0; layer < NL; base += NN[layer++]) {
+			if (layer > 0 && layer < NL - 1) {
+				int n = nk[0] + nk[1];
+				for (int i = 0; i < 2; i++)
+					tols[i] = eps_min + (4.0 - 4.0 * nk[i] / n) * (eps_stand - eps_min);
+				printf("%i LAYER TOLS: DIR(%Lf) && REV(%Lf)\n", layer + 1, tols[0], tols[1]);
+			}
+#pragma omp parallel for schedule(guided) num_threads(NPP)
+			for (int k = 0; k < NN[layer]; k++) {
+				int j = base + k;
+				int N = (int) XX[j].size();
+				vector<VARIANT>* VARS = new vector<VARIANT>();
+				double errw[n_kinds] = { 1E300, 1E300, 1E300, 1E300, 1E300 };
+				long double* bestKF[n_kinds] = { NULL, NULL, NULL, NULL, NULL };
+				int bestN[n_kinds] = { -1, -1, -1, -1, -1 };
+				long double min_errw = 1E300;
+				int kind = -1;
+
+				if (j != NB - 1) {
+					long double DIAP = SMAX[j] - SMIN[j];
+					long double d = (_div - 1) / DIAP;
+					int NP = (int) XX[j].size();
+					for (int i = 0; i < NP; i++)
+						SFREQ[j * _div + (int)((XX[j][i] - SMIN[j]) * d)]++;
+					vector<long double> W(NP);
+					for (int i = 0; i < NP; i++)
+						W[i] = SFREQ[j * _div + (int)((XX[j][i] - SMIN[j]) * d)];
+					vector<long double> XXSQR(N);
+					for (int i = 0; i < N; i++)
+						XXSQR[i] = sqrt(XX[j][i]);
+					vector<long double> XXREV(N);
+					for (int i = 0; i < N; i++)
+						XXREV[i] = 1 / XX[j][i];
+					vector<long double> XXSQRREV(N);
+					for (int i = 0; i < N; i++)
+						XXSQRREV[i] = 1 / sqrt(XX[j][i]);
+					vector<long double>* XXX[n_kinds] = { &XX[j], &XXSQR, &XXREV, &XXSQRREV, NULL };
+					for (int X = 0; X < n_kinds - 1; X++) {
+						for (int n = 2; n <= maxN; n++) {
+							double cur_err;
+							long double* KF = MNK_of_X(n, W, *XXX[X], YY[j], cur_err);
+							if (errw[X] > 0.01 && cur_err < 0.9 * errw[X]) {
+								delete[] bestKF[X];
+								bestKF[X] = KF;
+								bestN[X] = n;
+								errw[X] = cur_err;
+							}
+							else
+								delete[] KF;
+						}
+					}
+
+					for (int X = 0; X < n_kinds - 1; X++)
+						if (errw[X] < min_errw) {
+							min_errw = errw[X];
+							kind = X;
+						}
+				}
+				else {
+					kind = vkLinear;
+					bestN[kind] = 0;
+					errw[kind] = 0.0;
+					min_errw = 0.0;
+				}
+				VARIANT V = { kind, bestN[kind], bestKF[kind] };
+				VARS->push_back(V);
+				if (layer == 0)
+					nk[ns[kind]]++;
+				if (layer < NL - 1) {
+					for (int X = 0; X < n_kinds - 1; X++)
+						if (X != kind)
+							if (fabs(errw[X] - errw[kind]) < tols[ns[X]]) {
+								VARIANT V1 = { X, bestN[X], bestKF[X] };
+								VARS->push_back(V1);
+								if (layer == 0)
+									nk[ns[X]]++;
+							}
+				}
+
+#pragma omp critical
+				{
+					printf("LAYER %i : NEURON [%i] has range [%lf - %lf] described as { ",
+						layer + 1, k, (double)SMIN[j], (double)SMAX[j]
+					);
+					for (unsigned int k = 0; k < VARS->size(); k++) {
+						printf("%s%i[", kinds[(*VARS)[k].kind], (*VARS)[k].N);
+						for (int i = 0; i < (*VARS)[k].N; i++)
+							printf("%lf%s", (double)(*VARS)[k].KF[i], i < (*VARS)[k].N - 1 ? "," : "");
+						printf("]");
+						printf("%s", k < VARS->size() - 1 ? " , " : " }\n");
+					}
+					_VARS[j] = VARS;
+				}
+				fflush(stdout);
+			}
+		}
+
+		char* Vars[256];
+		for (int i = 0; i < NInputs + NB; i++) {
+			Vars[i] = new char[8];
+			Vars[i][0] = i < NInputs ? 'a' + i : 'z';
+			Vars[i][1] = i < NInputs ? 0x0 : '0' + (i - NInputs) / 10;
+			Vars[i][2] = i < NInputs ? 0x0 : '0' + (i - NInputs) % 10;
+			Vars[i][3] = 0x0;
+		}
+		zVars zvars;
+		vector<string> BEST;
+#pragma omp parallel if((int)(NPP*TASK_PART) > 1) num_threads(max(1,(int)(NPP*TASK_PART)))
+		{
+#pragma omp single
+			{
+				BUILD_FUNC(NPP, NVARIANTS, Simplify, BEST, Vars, _VARS, 1, zvars);
+#ifdef TASKED
+				if ((int)(NPP * TASK_PART) > 1) {
+#pragma omp taskwait
+				}
+#endif
+			}
+		}
+		for (int i = 0; i < NInputs + 1; i++) {
+			delete[] Vars[i];
+		}
+
+		for (unsigned int j = 0; j < _VARS.size(); j++) {
+			for (unsigned int X = 0; X < _VARS[j]->size(); X++)
+				delete[](*_VARS[j])[X].KF;
+			delete _VARS[j];
+			_VARS[j] = NULL;
+		}
+		fflush(stdout);
+
+		double time = omp_get_wtime() - start_time;
+
+		printf("ANALYZE Time = %lf sec.\n", time);
+
+		return BEST;
+	}
 };
 
 class nnet : public term {
@@ -1738,6 +2376,8 @@ public:
 	virtual const string get_content() { return net->get(); }
 
 	virtual bool train(int MAX_EPOCHS) { return net->train(MAX_EPOCHS); }
+
+	virtual vector<string> simplify(bool to_chain) { return net->simplify(to_chain); }
 
 	virtual long double sim() { return net->sim(); }
 	virtual unsigned int nX() { return net->nX(); }
@@ -7813,6 +8453,7 @@ public:
 class predicate_item_regularize : public predicate_item {
 public:
 	predicate_item_regularize(bool _neg, bool _once, bool _call, int num, clause* c, interpreter* _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) {
+		determined = false;
 	}
 
 	virtual const string get_id() { return "regularize"; }
@@ -7859,6 +8500,7 @@ public:
 class predicate_item_to_chain : public predicate_item {
 public:
 	predicate_item_to_chain(bool _neg, bool _once, bool _call, int num, clause* c, interpreter* _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) {
+		determined = false;
 	}
 
 	virtual const string get_id() { return "to_chain"; }
@@ -7907,6 +8549,7 @@ private:
 	string op;
 public:
 	predicate_item_symop(const string & _op, bool _neg, bool _once, bool _call, int num, clause* c, interpreter* _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) {
+		determined = _op != "div";
 		op = _op;
 	}
 
@@ -8004,7 +8647,7 @@ public:
 			exit(-3);
 		}
 		ifstream _IN(in->get_name());
-		nnet* v = new nnet(in->get_name(), _IN);
+		nnet* v = _IN ? new nnet(in->get_name(), _IN) : NULL;
 		if (!_IN || !positional_vals->at(1)->unify(CTX, ff, v)) {
 			delete result;
 			result = NULL;
@@ -8160,6 +8803,57 @@ public:
 			delete ff;
 		}
 		if (out) out->free();
+		return result;
+	}
+};
+
+class predicate_item_nsimplify : public predicate_item {
+public:
+	predicate_item_nsimplify(bool _neg, bool _once, bool _call, int num, clause* c, interpreter* _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) {
+		determined = false;
+	}
+
+	virtual const string get_id() { return "nsimplify"; }
+
+	virtual generated_vars* generate_variants(context* CTX, frame_item* f, vector<value*>*& positional_vals) {
+		if (positional_vals->size() != 2 && positional_vals->size() != 3) {
+			std::cout << "nsimplify(IN,OUT) or nsimplify(IN,to_chain,OUT): incorrect number of arguments!" << endl;
+			exit(-3);
+		}
+		generated_vars* result = new generated_vars();
+		frame_item* ff = f->copy(CTX);
+
+		result->push_back(ff);
+
+		bool d1 = positional_vals->at(0)->defined();
+		if (!d1) {
+			std::cout << "nsimplify(IN,OUT) or nsimplify(IN,to_chain,OUT) indeterminated!" << endl;
+			exit(-3);
+		}
+		nnet* in = dynamic_cast<nnet*>(positional_vals->at(0));
+		if (!in) {
+			std::cout << "nsimplify(IN,OUT) or nsimplify(IN,to_chain,OUT) : IN is not a neural net!" << endl;
+			exit(-3);
+		}
+		term* t2 = dynamic_cast<term*>(positional_vals->at(1));
+		bool to_chain = positional_vals->size() == 3 && positional_vals->at(1)->defined() && t2 && t2->get_name() == "to_chain";
+		size_t n3 = positional_vals->size() - 1;
+		vector<string> Vars;
+		vector<string> BEST;
+		size_t p = 0;
+		ITEM* r = prolog->deserialize_symbolic(in->get_name(), p, Vars);
+		if (r)
+			BEST = in->simplify(to_chain);
+		stack_container<value*> OUT_LIST;
+		for (string V : BEST)
+			OUT_LIST.push_back(new term(V));
+		::list* _out = new ::list(OUT_LIST, NULL);
+		if (!positional_vals->at(n3)->unify(CTX, ff, _out)) {
+			delete result;
+			result = NULL;
+			delete ff;
+		}
+		_out->free();
 		return result;
 	}
 };
@@ -10724,7 +11418,10 @@ string interpreter::parse_clause(context * CTX, vector<string> & renew, frame_it
 							}
 							else if (_iid == id_to_chain) {
 								pi = new predicate_item_to_chain(neg, once, call, num, cl, this);
-								}
+							}
+							else if (_iid == id_nsimplify) {
+								pi = new predicate_item_nsimplify(neg, once, call, num, cl, this);
+							}
 							else if (_iid == id_nload) {
 									pi = new predicate_item_nload(neg, once, call, num, cl, this);
 							}

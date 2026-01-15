@@ -99,6 +99,7 @@
 - to_chain
 - nload
 - nsave
+- nsimplify
 - train
 - sim
 - optimize_load
