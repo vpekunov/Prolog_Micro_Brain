@@ -97,6 +97,7 @@
 - div
 - regularize
 - to_chain
+- nnewff
 - nload
 - nsave
 - nsimplify

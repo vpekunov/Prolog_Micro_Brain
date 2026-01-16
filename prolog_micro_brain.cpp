@@ -1737,7 +1737,7 @@ public:
 		return true;
 	}
 
-	const string get() {
+	virtual const string get() {
 		ostringstream NET;
 
 		NET << "Net file after additional training by the nnets_simplify\n";
@@ -1792,6 +1792,8 @@ public:
 
 		return NET.str();
 	}
+
+	static std::string create(::list& nlayers, const std::string& dat_file, ::list& inps, int out);
 
 	/* LU - разложение  с выбором максимального элемента по диагонали */
 	bool _GetLU(int NN, int* iRow, long double* A, long double* LU)
@@ -3071,6 +3073,146 @@ public:
 		return result;
 	}
 };
+
+std::string network::create(::list& nlayers, const std::string& dat_file, ::list& inps, int out) {
+	ostringstream NET;
+
+	NET << "Net file after additional training by the nnets_simplify\n";
+	NET << "-------------------------------------------------------\n";
+
+	NET << inps.size() << "\n\n";
+	NET << dat_file << "\n\n";
+
+	ifstream dat(dat_file);
+
+	if (!dat) return "";
+
+	int _NCC[1024];
+
+	for (int i = 1; i <= inps.size(); i++) {
+		int_number* v = dynamic_cast<int_number*>(inps.get_nth(i, false));
+		if (!v)
+			return "";
+		_NCC[i - 1] = ((int)(0.5 + v->get_value()));
+	}
+
+	std::string line;
+	long double VALS[1024];
+	long double _MMIN[1024];
+	long double _MMAX[1024];
+	long double _NUMIN = 1E300;
+	long double _NUMAX = -1E300;
+	for (int i = 0; i < inps.size(); i++) {
+		_MMIN[i] = 1E300;
+		_MMAX[i] = -1E300;
+	}
+	size_t NR = 0;
+	size_t NC = 0;
+	while (getline(dat, line)) {
+		if (line.length()) {
+			istringstream LINE(line);
+			size_t locNC = 0;
+			while (LINE >> VALS[locNC])
+				locNC++;
+			if (locNC > NC)
+				NC = locNC;
+			for (int j = 0; j < inps.size(); j++) {
+				long double v = VALS[_NCC[j]];
+				if (v < _MMIN[j])
+					_MMIN[j] = v;
+				if (v > _MMAX[j])
+					_MMAX[j] = v;
+			}
+			long double ov = VALS[out];
+			if (ov < _NUMIN)
+				_NUMIN = ov;
+			if (ov > _NUMAX)
+				_NUMAX = ov;
+			NR++;
+		}
+	}
+
+	dat.close();
+
+	if (NC > inps.size() + 1)
+		return "";
+
+	NET << NR << " " << NC << "\n\n";
+
+	for (int i = 1; i <= inps.size(); i++) {
+		if (_NCC[i - 1] >= NC)
+			return "";
+		NET << _NCC[i - 1] << " ";
+	}
+	if (out >= NC)
+		return "";
+	NET << out << "\n\n";
+
+	for (int i = 1; i <= nlayers.size(); i++) {
+		int_number* v = dynamic_cast<int_number*>(nlayers.get_nth(i, false));
+		if (!v)
+			return "";
+		NET << ((int)(0.5 + v->get_value())) << " ";
+	}
+	NET << "\n\n";
+
+	NET << setprecision(15) << 1E300 << "\n\n";
+	for (int i = 0; i < inps.size(); i++)
+		NET << setprecision(15) << _MMIN[i] << " ";
+	NET << "\n";
+	for (int i = 0; i < inps.size(); i++)
+		NET << setprecision(15) << _MMAX[i] << " ";
+	NET << "\n\n";
+	for (int i = 0; i < inps.size(); i++)
+		NET << setprecision(15) << -1 << " ";
+	NET << "\n";
+	for (int i = 0; i < inps.size(); i++)
+		NET << setprecision(15) << +1 << " ";
+	NET << "\n\n";
+	NET << setprecision(15) << _NUMIN << "\n";
+	NET << setprecision(15) << _NUMAX << "\n\n";
+	NET << setprecision(15) << -1 << "\n";
+	NET << setprecision(15) << +1 << "\n\n";
+
+	auto rd = std::random_device{};
+	auto rng = std::default_random_engine{ rd() };
+	std::uniform_real_distribution<double> distribution(-1.0, 1.0);
+
+	int ptr = 0;
+	for (int layer = 0; layer < nlayers.size(); layer++) {
+		int NP;
+		if (layer == 0)
+			NP = inps.size();
+		else {
+			int_number* v = dynamic_cast<int_number*>(nlayers.get_nth(layer, false));
+			if (!v)
+				return "";
+			NP = ((int)(0.5 + v->get_value()));
+		}
+		for (int i = 0; i < NP; i++) {
+			int_number* v = dynamic_cast<int_number*>(nlayers.get_nth(layer + 1, false));
+			if (!v)
+				return "";
+			int _NN = ((int)(0.5 + v->get_value()));
+			for (int j = 0; j < _NN; j++, ptr++)
+				NET << setprecision(15) << distribution(rng) << " ";
+			NET << "\n";
+		}
+		NET << "\n";
+	}
+	ptr = 0;
+	for (int layer = 0; layer < nlayers.size(); layer++) {
+		int_number* v = dynamic_cast<int_number*>(nlayers.get_nth(layer + 1, false));
+		if (!v)
+			return "";
+		int _NN = ((int)(0.5 + v->get_value()));
+		for (int j = 0; j < _NN; j++, ptr++)
+			NET << setprecision(15) << distribution(rng) << " ";
+		NET << "\n\n";
+	}
+
+	return NET.str();
+}
 
 context::context(bool locals_in_forked, bool transactable_facts, predicate_item* forker, int RESERVE, context* parent, tframe_item* tframe,
 		predicate_item* starting, predicate_item* ending, interpreter* prolog) {
@@ -8858,6 +9000,51 @@ public:
 	}
 };
 
+class predicate_item_nnetff : public predicate_item {
+public:
+	predicate_item_nnetff(bool _neg, bool _once, bool _call, int num, clause* c, interpreter* _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) {
+		determined = false;
+	}
+
+	virtual const string get_id() { return "nnetff"; }
+
+	virtual generated_vars* generate_variants(context* CTX, frame_item* f, vector<value*>*& positional_vals) {
+		if (positional_vals->size() != 5) {
+			std::cout << "nnetff([N1,...,Nn],DAT_FILE,[Xcol1,...XcolK],Ycol,OUT_FILE): incorrect number of arguments!" << endl;
+			exit(-3);
+		}
+		generated_vars* result = new generated_vars();
+		frame_item* ff = f->copy(CTX);
+
+		result->push_back(ff);
+
+		for (int i = 0; i < 5; i++)
+			if (!positional_vals->at(i)->defined()) {
+				std::cout << "nnetff([N1,...,Nn],DAT_FILE,[Xcol1,...XcolK],Ycol,OUT_FILE) indeterminated!" << endl;
+				exit(-3);
+			}
+		::list* layers = dynamic_cast<::list*>(positional_vals->at(0));
+		term* dat_file = dynamic_cast<term*>(positional_vals->at(1));
+		::list* inps = dynamic_cast<::list*>(positional_vals->at(2));
+		int_number* out = dynamic_cast<int_number*>(positional_vals->at(3));
+		term* out_file = dynamic_cast<term*>(positional_vals->at(4));
+		if (!layers || !dat_file || !inps || !out || !out_file) {
+			std::cout << "nnetff([N1,...,Nn],DAT_FILE,[Xcol1,...XcolK],Ycol,OUT_FILE) : incorrect arguments types!" << endl;
+			exit(-3);
+		}
+		std::string content = network::create(*layers, dat_file->get_name(), *inps, ((int)(0.5 + out->get_value())));
+		ofstream _out(out_file->get_name());
+		if (!_out || content.length() == 0) {
+			delete result;
+			result = NULL;
+			delete ff;
+		}
+		_out << content;
+		_out.close();
+		return result;
+	}
+};
+
 class predicate_item_read_token_common : public predicate_item {
 public:
 	predicate_item_read_token_common(bool _neg, bool _once, bool _call, int num, clause * c, interpreter * _prolog) :
@@ -11421,6 +11608,9 @@ string interpreter::parse_clause(context * CTX, vector<string> & renew, frame_it
 							}
 							else if (_iid == id_nsimplify) {
 								pi = new predicate_item_nsimplify(neg, once, call, num, cl, this);
+							}
+							else if (_iid == id_nnetff) {
+								pi = new predicate_item_nnetff(neg, once, call, num, cl, this);
 							}
 							else if (_iid == id_nload) {
 									pi = new predicate_item_nload(neg, once, call, num, cl, this);

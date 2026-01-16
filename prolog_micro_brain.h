@@ -85,6 +85,7 @@ class predicate_item;
 class predicate_item_user;
 class generated_vars;
 class term;
+class list;
 class tthread;
 class context;
 class tframe_item;
@@ -333,6 +334,7 @@ public:
 		id_div,
 		id_to_chain,
 		id_nsimplify,
+		id_nnetff,
 		id_char_code,
 		id_nload,
 		id_nsave,
@@ -452,6 +454,7 @@ public:
 		{ "div", id_div },
 		{ "to_chain", id_to_chain },
 		{ "nsimplify", id_nsimplify },
+		{ "nnetff", id_nnetff },
 		{ "char_code", id_char_code },
 		{ "nload", id_nload },
 		{ "nsave", id_nsave },
