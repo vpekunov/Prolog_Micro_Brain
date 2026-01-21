@@ -36,6 +36,10 @@
 #include <sched.h>
 #endif
 
+#ifdef __linux__
+#define _isnan isnan
+#endif
+
 const long long eli = 60;
 
 void reverse(char s[])
