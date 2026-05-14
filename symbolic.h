@@ -25,13 +25,24 @@
 #include <string>
 #include <chrono>
 
+#ifdef _OPENMP
 #include <omp.h>
+#else
+typedef int omp_lock_t;
+void omp_init_lock(omp_lock_t *) { }
+void omp_set_lock(omp_lock_t *) { }
+void omp_unset_lock(omp_lock_t *) { }
+void omp_destroy_lock(omp_lock_t *) { }
+int omp_get_thread_num() { return 0; }
+int omp_get_num_procs() { return 1; }
+double omp_get_wtime() { return std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count(); }
+#endif
 
 static int NPROCS = 1;
 
 static double TASK_PART = 3.0/4.0;
 
-#ifndef __linux__
+#ifdef _MSC_VER
 
 #define ONE64 1ui64
 #define FULL64 0xFFui64
@@ -956,8 +967,8 @@ ITEM* MUL::Neg() {
 ITEM* MUL::Add(ITEM* op) {
 	SUMMAND* M = dynamic_cast<SUMMAND*>(op);
 	SUM* S = dynamic_cast<SUM*>(op);
-	MUL* THIS = dynamic_cast<MUL*>(this->clone());
-	SUM* result = new SUM(THIS);
+	MUL* _THIS = dynamic_cast<MUL*>(this->clone());
+	SUM* result = new SUM(_THIS);
 	if (M)
 		result->Add(M, true);
 	else
@@ -971,8 +982,8 @@ ITEM* MUL::Sub(ITEM* op) {
 	delete old;
 	SUMMAND* M = dynamic_cast<SUMMAND*>(op);
 	SUM* S = dynamic_cast<SUM*>(op);
-	MUL* THIS = dynamic_cast<MUL*>(this->clone());
-	SUM* result = new SUM(THIS);
+	MUL* _THIS = dynamic_cast<MUL*>(this->clone());
+	SUM* result = new SUM(_THIS);
 	if (M)
 		result->Add(M, true);
 	else
@@ -983,8 +994,8 @@ ITEM* MUL::Sub(ITEM* op) {
 ITEM* MUL::Mul(ITEM* op) {
 	SUMMAND* M = dynamic_cast<SUMMAND*>(op);
 	SUM* S = dynamic_cast<SUM*>(op);
-	MUL* THIS = dynamic_cast<MUL*>(this->clone());
-	SUM* result = new SUM(THIS);
+	MUL* _THIS = dynamic_cast<MUL*>(this->clone());
+	SUM* result = new SUM(_THIS);
 	if (M)
 		result->Mul(M, false);
 	else
@@ -996,8 +1007,8 @@ ITEM* MUL::Div(ITEM* op) {
 	MUL* M = dynamic_cast<MUL*>(op);
 	DIV* D = dynamic_cast<DIV*>(op);
 	SUM* S = dynamic_cast<SUM*>(op);
-	MUL* THIS = dynamic_cast<MUL*>(this->clone());
-	SUM* S1 = new SUM(THIS);
+	MUL* _THIS = dynamic_cast<MUL*>(this->clone());
+	SUM* S1 = new SUM(_THIS);
 	if (M) {
 		SUM* S2 = new SUM(M);
 		return new DIV(S1, S2);
@@ -1292,15 +1303,15 @@ ITEM* DIV::Neg() {
 }
 
 ITEM* DIV::Add(ITEM* op) {
-	DIV* THIS = dynamic_cast<DIV*>(this->clone());
-	SUM* result = new SUM(THIS);
+	DIV* _THIS = dynamic_cast<DIV*>(this->clone());
+	SUM* result = new SUM(_THIS);
 	result->Add(op);
 	return result;
 }
 
 ITEM* DIV::Sub(ITEM* op) {
-	DIV* THIS = dynamic_cast<DIV*>(this->clone());
-	SUM* result = new SUM(THIS);
+	DIV* _THIS = dynamic_cast<DIV*>(this->clone());
+	SUM* result = new SUM(_THIS);
 	ITEM* old = op;
 	op = old->Neg();
 	delete old;
@@ -1309,18 +1320,18 @@ ITEM* DIV::Sub(ITEM* op) {
 }
 
 ITEM* DIV::Mul(ITEM* op) {
-	DIV* THIS = dynamic_cast<DIV*>(this->clone());
-	SUM* result = new SUM(THIS);
+	DIV* _THIS = dynamic_cast<DIV*>(this->clone());
+	SUM* result = new SUM(_THIS);
 	result->Mul(op);
 	return result;
 }
 
 ITEM* DIV::Div(ITEM* op) {
-	DIV* THIS = dynamic_cast<DIV*>(this->clone());
+	DIV* _THIS = dynamic_cast<DIV*>(this->clone());
 	MUL* M = dynamic_cast<MUL*>(op);
 	DIV* D = dynamic_cast<DIV*>(op);
 	SUM* S = dynamic_cast<SUM*>(op);
-	SUM* S1 = new SUM(THIS);
+	SUM* S1 = new SUM(_THIS);
 	if (M) {
 		SUM* S2 = new SUM(M);
 		return new DIV(S1, S2);
