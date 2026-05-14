@@ -24,6 +24,7 @@
 #include <functional>
 #include <chrono>
 #include <regex>
+#include <cmath>
 
 #include <math.h>
 #include <time.h>
@@ -36,8 +37,10 @@
 #include <sched.h>
 #endif
 
-#ifdef __linux__
-#define _isnan isnan
+#ifndef _MSC_VER
+bool _isnan(double x) {
+	return std::isnan(x);
+}
 #endif
 
 const long long eli = 60;
@@ -12797,7 +12800,7 @@ void clause::add_export(string& result, bool introduce_new_parallelism) {
 		result += ".\n";
 }
 
-#ifdef __linux__
+#ifndef _MSC_VER
 unsigned long long getTotalSystemMemory()
 {
 	long pages = sysconf(_SC_PHYS_PAGES);
@@ -12825,13 +12828,14 @@ unsigned int getTotalProcs()
 #endif
 
 int main(int argc, char ** argv) {
-#ifdef __linux__
+#ifndef _MSC_VER
 	struct rlimit rl = { RLIM_INFINITY, RLIM_INFINITY };
 	int result = setrlimit(RLIMIT_STACK, &rl);
 	if (result != 0) {
 		std::cout << "setrlimit returned result = " << result << endl;
 		exit(1000);
 	}
+#if defined(__unix__) || defined(__linux__)
 	pthread_attr_t attr;
 	pthread_attr_init(&attr);
 	size_t default_stack_size;
@@ -12839,6 +12843,7 @@ int main(int argc, char ** argv) {
 
 	pthread_attr_setstacksize(&attr, 16 * default_stack_size);
 	pthread_setattr_default_np(&attr);
+#endif
 #endif
 
 	setlocale(LC_ALL, "en_US.UTF-8");

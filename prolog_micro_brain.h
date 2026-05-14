@@ -35,7 +35,7 @@ const int PAR_SEQ_JOIN_AFTER = 2;
 unsigned long long getTotalSystemMemory();
 unsigned int getTotalProcs();
 
-#ifdef __linux__
+#ifndef _MSC_VER
 #include <sys/resource.h>
 #include <unistd.h>
 #include <pthread.h>
@@ -536,7 +536,7 @@ public:
 		bool result = false;
 		if (!xpathInductLib) {
 			xpathInductLib = LoadLibrary(
-#ifdef __linux__
+#ifndef _MSC_VER
 				L"./libxpathInduct.so"
 #else
 				L"xpathInduct.dll"
