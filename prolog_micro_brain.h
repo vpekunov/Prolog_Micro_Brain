@@ -327,6 +327,7 @@ public:
 		id_div,
 		id_to_chain,
 		id_nsimplify,
+		id_granularize,
 		id_nnetff,
 		id_char_code,
 		id_nload,
@@ -447,6 +448,7 @@ public:
 		{ "div", id_div },
 		{ "to_chain", id_to_chain },
 		{ "nsimplify", id_nsimplify },
+		{ "granularize", id_granularize },
 		{ "nnetff", id_nnetff },
 		{ "char_code", id_char_code },
 		{ "nload", id_nload },
@@ -988,7 +990,11 @@ public:
 };
 #else
 #include <thread>
-typedef std::thread pro_thread;
+class pro_thread : public std::thread {
+public:
+	pro_thread(tthread * _this) : std::thread(&tthread::body, _this) {
+	}
+};
 #endif
 
 class thread_pool {

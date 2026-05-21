@@ -1246,7 +1246,7 @@ public:
 };
 
 class network {
-private:
+public:
 	int NInputs;
 	std::string FNAME, DAT_FILE_NAME;
 	int NRows = 0;
@@ -1300,7 +1300,79 @@ private:
 
 	const char* kinds[n_kinds] = { "POLY", "POLYSQR", "POLYREV", "POLYSQRREV", "LIN" };
 
-public:
+	network(const network& src) {
+		NInputs = src.NInputs;
+		FNAME = src.FNAME;
+		DAT_FILE_NAME = src.DAT_FILE_NAME;
+		NRows = src.NRows;
+		NCols = src.NCols;
+		for (int i = 0; i < NCols; i++)
+			NCC[i] = src.NCC[i];
+		NL = src.NL;
+		for (int i = 0; i < NL; i++)
+			NN[i] = src.NN[i];
+		best_err = src.best_err;
+
+		memmove(YN, src.YN, sizeof(YN));
+
+		memmove(MMIN, src.MMIN, sizeof(MMIN));
+		memmove(MMAX, src.MMAX, sizeof(MMAX));
+		memmove(mmin, src.mmin, sizeof(mmin));
+		memmove(mmax, src.mmax, sizeof(mmax));
+
+		NUMIN = src.NUMIN;
+		numin = src.numin;
+		NUMAX = src.NUMAX;
+		numax = src.numax;
+
+		memmove(d, src.d, sizeof(d));
+		nud = src.nud;
+
+		NW = src.NW;
+		NB = src.NB;
+
+		if (src.W) {
+			W = new long double [NW];
+			memmove(W, src.W, NW * sizeof(long double));
+		}
+		else
+			W = NULL;
+		if (src.B) {
+			B = new long double[NB];
+			memmove(B, src.B, NB * sizeof(long double));
+		}
+		else
+			B = NULL;
+
+		memmove(tempX, src.tempX, sizeof(tempX));
+
+		for (int i = 0; i < src.NCols; i++)
+			if (src.X[i]) {
+				X[i] = new long double[src.NRows];
+				memmove(X[i], src.X[i], src.NRows * sizeof(long double));
+			}
+			else
+				X[i] = NULL;
+		if (src.Y) {
+			Y = new long double[src.NRows];
+			memmove(Y, src.Y, src.NRows * sizeof(long double));
+		}
+		else
+			Y = NULL;
+		if (src.YS) {
+			YS = new long double[src.NRows];
+			memmove(YS, src.YS, src.NRows * sizeof(long double));
+		}
+		else
+			YS = NULL;
+		if (src.ERR) {
+			ERR = new long double[src.NRows];
+			memmove(ERR, src.ERR, src.NRows * sizeof(long double));
+		}
+		else
+			ERR = NULL;
+	}
+
 	network(const std::string& FName, const std::string& content) {
 		FNAME = FName;
 		istringstream NET(content);
@@ -1391,17 +1463,95 @@ public:
 
 		nud = NUMAX == NUMIN ? 1.0 : (numax - numin) / (NUMAX - NUMIN);
 
+		auto read_val = [&](istringstream& NET, long double& W) {
+			string token;
+			NET >> token;
+			if (token == "inf" || token == "infinity")
+				W = INFINITY;
+			else
+				W = stold(token);
+		};
+
 		int ptr = 0;
 		for (int layer = 0; layer < NL; layer++) {
 			int NP = layer == 0 ? NInputs : NN[layer - 1];
 			for (int i = 0; i < NP; i++)
 				for (int j = 0; j < NN[layer]; j++, ptr++)
-					NET >> W[ptr];
+					read_val(NET, W[ptr]);
 		}
 		ptr = 0;
 		for (int layer = 0; layer < NL; layer++)
 			for (int j = 0; j < NN[layer]; j++, ptr++)
 				NET >> B[ptr];
+	}
+
+	network(network * templ, int ni, int n1, int n2, bool first, bool last) {
+		FNAME = templ->FNAME;
+
+		NInputs = ni;
+		DAT_FILE_NAME = templ->DAT_FILE_NAME;
+
+		NRows = templ->NRows;
+		NCols = templ->NCols;
+
+		for (int i = 0; i <= ni; i++)
+			NCC[i] = templ->NCC[i];
+
+		NL = 3;
+
+		NN[0] = n1;
+		NN[1] = n2;
+		NN[2] = 1;
+
+		for (int i = 0; i < NL; i++) {
+			int NP = i == 0 ? NInputs : NN[i - 1];
+			NW += NP * NN[i];
+			NB += NN[i];
+		}
+
+		W = new long double[NW];
+		B = new long double[NB];
+
+		YS = new long double[NRows];
+		ERR = new long double[NRows];
+
+		best_err = templ->best_err;
+
+		for (int i = 0; i < NInputs; i++)
+			MMIN[i] = first ? templ->MMIN[i] : 0.0;
+		for (int i = 0; i < NInputs; i++)
+			MMAX[i] = first ? templ->MMAX[i] : 1.0;
+		for (int i = 0; i < NInputs; i++)
+			mmin[i] = first ? templ->mmin[i] : 0.0;
+		for (int i = 0; i < NInputs; i++)
+			mmax[i] = first ? templ->mmax[i] : 1.0;
+		NUMIN = last ? templ->NUMIN : 0.0;
+		NUMAX = last ? templ->NUMAX : 1.0;
+		numin = last ? templ->numin : 0.0;
+		numax = last ? templ->numax : 1.0;
+
+		for (int p = 0; p < NInputs; p++) {
+			d[p] = MMAX[p] == MMIN[p] ? 1.0 : (mmax[p] - mmin[p]) / (MMAX[p] - MMIN[p]);
+		}
+
+		nud = NUMAX == NUMIN ? 1.0 : (numax - numin) / (NUMAX - NUMIN);
+
+		int ptr = 0;
+		for (int layer = 0; layer < NL; layer++) {
+			int NP = layer == 0 ? NInputs : NN[layer - 1];
+			for (int i = 0; i < NP; i++)
+				for (int j = 0; j < NN[layer]; j++, ptr++)
+					W[ptr] = 0.5;
+		}
+		ptr = 0;
+		for (int layer = 0; layer < NL; layer++)
+			for (int j = 0; j < NN[layer]; j++, ptr++)
+				B[ptr] = 0.5;
+
+		for (int s = 0; s < NInputs; s++)
+			X[s] = new long double[NRows];
+
+		Y = new long double[NRows];
 	}
 
 	virtual const std::string & fname() { return FNAME; }
@@ -1412,6 +1562,10 @@ public:
 		tempX[i] = mmin[i] + (v - MMIN[i]) * d[i];
 	}
 	
+	virtual void set_rowX(unsigned int i, long double v) {
+		tempX[i] = v;
+	}
+
 	virtual unsigned int nX() { return NInputs; }
 
 	virtual long double sim() { return NUMIN + (NET(-1) - numin) / nud; }
@@ -1456,7 +1610,7 @@ public:
 		return 1.0 / (1.0 + exp(-s));
 	};
 
-	inline long double NET(int i, long double* SMIN = NULL, long double* SMAX = NULL,
+	virtual long double NET(int i, long double* SMIN = NULL, long double* SMAX = NULL,
 		vector<long double>* XX = NULL, vector<long double>* YY = NULL) {
 		for (int i = 0; i < NL - 1; i++)
 			memset(&YN[i], 0, NN[i] * sizeof(long double));
@@ -1552,12 +1706,12 @@ public:
 				ERR[i] = fabs(delta);
 				err += ERR[i];
 
-				DB[NB - 1] = alpha * DB[NB - 1] + (1 - alpha) * (-nu * delta);
+				DB[NB - 1] = isinf(B[NB-1]) ? 0.0 : alpha * DB[NB - 1] + (1 - alpha) * (-nu * delta);
 				B[NB - 1] += DB[NB - 1];
 
 				int ptr = NW - 1;
 				for (int k = NN[NL - 2] - 1; k >= 0; k--, ptr--) {
-					DW[ptr] = alpha * DW[ptr] + (1 - alpha) * (-nu * delta * YN[NL - 2][k]);
+					DW[ptr] = isinf(W[ptr]) ? 0.0 : alpha * DW[ptr] + (1 - alpha) * (-nu * delta * YN[NL - 2][k]);
 					W[ptr] += DW[ptr];
 				}
 
@@ -1574,11 +1728,11 @@ public:
 					ptr = ptrw;
 					for (int j = NN[layer - 1] - 1; j >= 0; j--)
 						for (int k = NN[layer] - 1; k >= 0; k--, ptrw--) {
-							DW[ptrw] = alpha * DW[ptrw] + (1 - alpha) * (-nu * deltas[k] * YN[layer - 1][j]);
+							DW[ptrw] = isinf(W[ptrw]) ? 0.0 : alpha * DW[ptrw] + (1 - alpha) * (-nu * deltas[k] * YN[layer - 1][j]);
 							W[ptrw] += DW[ptrw];
 						}
 					for (int k = NN[layer] - 1; k >= 0; k--, ptrb--) {
-						DB[ptrb] = alpha * DB[ptrb] + (1 - alpha) * (-nu * deltas[k]);
+						DB[ptrb] = isinf(B[ptrb]) ? 0.0 : alpha * DB[ptrb] + (1 - alpha) * (-nu * deltas[k]);
 						B[ptrb] += DB[ptrb];
 					}
 
@@ -1594,11 +1748,11 @@ public:
 				ptr = 0;
 				for (int j = 0; j < NInputs; j++)
 					for (int k = 0; k < NN[0]; k++, ptr++) {
-						DW[ptr] = alpha * DW[ptr] + (1 - alpha) * (-nu * deltas[k] * X[j][i]);
+						DW[ptr] = isinf(W[ptr]) ? 0.0 : alpha * DW[ptr] + (1 - alpha) * (-nu * deltas[k] * X[j][i]);
 						W[ptr] += DW[ptr];
 					}
 				for (int k = 0; k < NN[0]; k++) {
-					DB[k] = alpha * DB[k] + (1 - alpha) * (-nu * deltas[k]);
+					DB[k] = isinf(B[k]) ? 0.0 : alpha * DB[k] + (1 - alpha) * (-nu * deltas[k]);
 					B[k] += DB[k];
 				}
 			}
@@ -1627,7 +1781,7 @@ public:
 		return result;
 	}
 
-	virtual vector<std::string> simplify(bool to_chain) {
+	virtual vector<std::string> simplify(bool to_chain, int NVARIANTS, const std::string & OUT_VAR, const std::string & DECLARATOR, const std::string& POSTFIX, set<std::string> & defined) {
 		bool non_compact = false;
 		if (!Y) non_compact = load_data();
 
@@ -1656,7 +1810,7 @@ public:
 					long double err2 = 0.0;
 					for (int i = 0; i < NRows; i++)
 						err2 += fabs(Y[i] - NET(i));
-					if (err2 - err1 < min_delta) {
+					if (err2 >= err1 && err2 - err1 < min_delta) {
 						min_delta = err2 - err1;
 						min_n_w = j;
 					}
@@ -1700,8 +1854,7 @@ public:
 		for (int i = 0; i < NRows; i++)
 			NET(i, SMIN, SMAX, XX, YY);
 
-		int NVARIANTS = HOW_MANY;
-		vector<std::string> result = ANALYZE(omp_get_num_procs(), NVARIANTS, to_chain, SMIN, SMAX, SFREQ, XX, YY);
+		vector<std::string> result = ANALYZE(omp_get_num_procs(), NVARIANTS, OUT_VAR, DECLARATOR, POSTFIX, defined, to_chain, SMIN, SMAX, SFREQ, XX, YY);
 
 		delete[] XX;
 		delete[] YY;
@@ -1963,6 +2116,7 @@ public:
 
 	void* BUILD_FUNC(int NPP, int& NVARIANTS, bool Simplify,
 		vector<string>& BEST,
+		const string & OUT_VAR, const string & DECLARATOR, const std::string& POSTFIX, set<std::string> & defined,
 		char** Vars,
 		vector<vector<VARIANT>*>_VARS,
 		int layer, zVars& zvars, string* Scheme = NULL, SUM** Inputs = NULL) {
@@ -2057,7 +2211,7 @@ public:
 			}
 
 			if (layer < NL) {
-				BUILD_FUNC(NPP, NVARIANTS, Simplify, BEST, Vars, _VARS, layer + 1, zvars, _Scheme, _OUTPUTS);
+				BUILD_FUNC(NPP, NVARIANTS, Simplify, BEST, OUT_VAR, DECLARATOR, POSTFIX, defined, Vars, _VARS, layer + 1, zvars, _Scheme, _OUTPUTS);
 			}
 			else {
 				if (NVARIANTS > 0) {
@@ -2121,10 +2275,16 @@ public:
 								char Num[32] = "";
 								_sprintf1(Num, 32, "%u", ppv);
 								CUR += Num;
+								if (defined.find(CUR) == defined.end()) {
+									defined.insert(CUR);
+									*Buf += DECLARATOR;
+									*Buf += " ";
+								}
 								*Buf += CUR;
 								*Buf += "=";
 								*Buf += _DEF;
 								_DEF = CUR;
+								*Buf += POSTFIX;
 								*Buf += "\n";
 							}
 						}
@@ -2137,10 +2297,17 @@ public:
 							string* zBuf = new string("");
 							zBuf->reserve(32 * 1024 * 1024);
 							z_S->sprint(Vars, maxPows, zBuf);
+							if (defined.find(z_it->first) == defined.end()) {
+								defined.insert(z_it->first);
+								*Buf += DECLARATOR;
+								*Buf += " ";
+							}
 							*Buf += z_it->first.c_str();
 							*Buf += " = sqrt(";
 							*Buf += *zBuf;
-							*Buf += ")\n";
+							*Buf += ")";
+							*Buf += POSTFIX;
+							*Buf += "\n";
 							delete zBuf;
 						}
 					delete _S;
@@ -2148,10 +2315,22 @@ public:
 #pragma omp critical
 					{
 						string STR = *Buf;
-						STR += "NET<";
-						STR += *SCHEME;
-						STR += "> : ";
+						if (OUT_VAR.length() == 0) {
+							STR += "NET<";
+							STR += *SCHEME;
+							STR += "> : ";
+						}
+						else {
+							if (defined.find(OUT_VAR) == defined.end()) {
+								defined.insert(OUT_VAR);
+								STR += DECLARATOR;
+								STR += " ";
+							}
+							STR += OUT_VAR;
+							STR += " = ";
+						}
 						STR += SNET;
+						STR += POSTFIX;
 
 						size_t L = STR.length();
 						vector<string>::iterator after = BEST.begin();
@@ -2202,7 +2381,7 @@ public:
 		return NULL;
 	};
 
-	vector<string> ANALYZE(int NPP, int & NVARIANTS, bool Simplify,
+	vector<string> ANALYZE(int NPP, int & NVARIANTS, const std::string & OUT_VAR, const std::string & DECLARATOR, const std::string& POSTFIX, set<std::string> & defined, bool Simplify,
 		long double* SMIN, long double* SMAX, int* SFREQ,
 		vector<long double> XX[], vector<long double> YY[]) {
 
@@ -2238,7 +2417,7 @@ public:
 
 				if (j != NB - 1) {
 					long double DIAP = SMAX[j] - SMIN[j];
-					long double d = (_div - 1) / DIAP;
+					long double d = fabs(DIAP) < 1E-17 ? 0.0 : (_div - 1) / DIAP;
 					int NP = (int) XX[j].size();
 					for (int i = 0; i < NP; i++)
 						SFREQ[j * _div + (int)((XX[j][i] - SMIN[j]) * d)]++;
@@ -2329,7 +2508,7 @@ public:
 		{
 #pragma omp single
 			{
-				BUILD_FUNC(NPP, NVARIANTS, Simplify, BEST, Vars, _VARS, 1, zvars);
+				BUILD_FUNC(NPP, NVARIANTS, Simplify, BEST, OUT_VAR, DECLARATOR, POSTFIX, defined, Vars, _VARS, 1, zvars);
 #ifdef TASKED
 				if ((int)(NPP * TASK_PART) > 1) {
 #pragma omp taskwait
@@ -2357,6 +2536,308 @@ public:
 	}
 };
 
+class block_network : public network {
+protected:
+	unsigned int n_networks = 0;
+	network ** NETWORKS = NULL;
+public:
+	block_network(const block_network& src) : network(src) {
+		n_networks = src.n_networks;
+		NETWORKS = new network * [n_networks];
+		for (int i = 0; i < n_networks; i++)
+			NETWORKS[i] = new network(*src.NETWORKS[i]);
+	}
+
+	block_network(const std::string& FName, const std::string& content) : network(FName, content) {
+		if (NL % 3) {
+			printf("Only nets with (NLayers %% 3 == 0) can have 'block' type\n");
+			exit(-19);
+		}
+
+		load_data();
+
+		for (int layer = 2; layer < NL; layer += 3) {
+			n_networks += NN[layer];
+		}
+		NETWORKS = new network * [n_networks];
+
+		int WBASE = 0;
+		int BBASE = 0;
+		n_networks = 0;
+		for (int layer = 2; layer < NL; layer += 3) {
+			int n = layer == 2 ? NInputs : NN[layer - 3];
+			int NOUTS = NN[layer];
+			int N1 = NN[layer - 2] / NOUTS;
+			int rN1 = NN[layer - 2] % NOUTS;
+			int N2 = NN[layer - 1] / NOUTS;
+			int rN2 = NN[layer - 1] % NOUTS;
+			int BBASE2 = BBASE + NN[layer - 2];
+			int BBASE3 = BBASE2 + NN[layer - 1];
+			int nw[1024] = { 0 };
+			int nb[1024] = { 0 };
+			for (int N = 0; N < NOUTS; N++) {
+				int _N1 = N1;
+				if (N < rN1) _N1++;
+				int _N2 = N2;
+				if (N < rN2) _N2++;
+
+				NETWORKS[n_networks+N] = new network(this, n, _N1, _N2, layer == 2, layer == NL-1);
+
+				int _BBASE = BBASE + N;
+				for (int i = 0; i < _N1; i++, nb[N]++) {
+					for (int j = 0; j < n; j++, nw[N]++) {
+						NETWORKS[n_networks+N]->W[nw[N]] = W[WBASE++];
+					}
+					NETWORKS[n_networks+N]->B[nb[N]] = B[_BBASE];
+					_BBASE++;
+				}
+			}
+			for (int N = 0; N < NOUTS; N++) {
+				int _N1 = N1;
+				if (N < rN1) _N1++;
+				int _N2 = N2;
+				if (N < rN2) _N2++;
+
+				int _BBASE2 = BBASE2 + N;
+				for (int j = 0; j < N*_N1; j++) {
+					WBASE++;
+				}
+				for (int i = 0; i < _N2; i++, nb[N]++) {
+					for (int j = 0; j < _N1; j++, nw[N]++) {
+						NETWORKS[n_networks+N]->W[nw[N]] = W[WBASE++];
+					}
+					NETWORKS[n_networks+N]->B[nb[N]] = B[_BBASE2];
+					_BBASE2++;
+				}
+				for (int j = 0; j < (NN[layer - 1] - N - _N2)*_N1; j++) {
+					WBASE++;
+				}
+			}
+			for (int N = 0; N < NOUTS; N++, n_networks++) {
+				int _N1 = N1;
+				if (N < rN1) _N1++;
+				int _N2 = N2;
+				if (N < rN2) _N2++;
+
+				int _BBASE3 = BBASE3 + N;
+				for (int j = 0; j < N*_N2; j++, nw) {
+					WBASE++;
+				}
+				for (int j = 0; j < _N2; j++, nw[N]++) {
+					NETWORKS[n_networks]->W[nw[N]] = W[WBASE++];
+				}
+				for (int j = 0; j < (NN[layer]-N-1)*_N2; j++) {
+					WBASE++;
+				}
+				NETWORKS[n_networks]->B[nb[N]] = B[_BBASE3];
+				NETWORKS[n_networks]->best_err = 100.0 * best_err;
+			}
+			BBASE = BBASE3 + NOUTS;
+		}
+
+		for (int i = 0; i < NRows; i++) {
+			YN[NL - 1][0] = network::NET(i);
+
+			n_networks = 0;
+			BBASE = 0;
+			for (int layer = 2; layer < NL; layer += 3) {
+				int n = layer == 2 ? NInputs : NN[layer - 3];
+				int NOUTS = NN[layer];
+				for (int N = 0; N < NOUTS; N++, n_networks++) {
+					for (int j = 0; j < n; j++) {
+						double x = layer == 2 ? X[j][i] : YN[layer - 3][j];
+						NETWORKS[n_networks]->X[j][i] = x;
+					}
+					double y = YN[layer][N];
+					NETWORKS[n_networks]->Y[i] = y;
+				}
+			}
+		}
+
+		WBASE = 0;
+		BBASE = 0;
+		n_networks = 0;
+		for (int layer = 2; layer < NL; layer += 3) {
+			int n = layer == 2 ? NInputs : NN[layer - 3];
+			int NOUTS = NN[layer];
+			int N1 = NN[layer - 2] / NOUTS;
+			int rN1 = NN[layer - 2] % NOUTS;
+			int N2 = NN[layer - 1] / NOUTS;
+			int rN2 = NN[layer - 1] % NOUTS;
+			int BBASE2 = BBASE + NN[layer - 2];
+			int BBASE3 = BBASE2 + NN[layer - 1];
+			int nw[1024] = { 0 };
+			int nb[1024] = { 0 };
+			for (int N = 0; N < NOUTS; N++) {
+				int _N1 = N1;
+				if (N < rN1) _N1++;
+				int _N2 = N2;
+				if (N < rN2) _N2++;
+
+				int _BBASE = BBASE + N;
+				for (int i = 0; i < _N1; i++, nb[N]++) {
+					for (int j = 0; j < n; j++, nw[N]++) {
+						WBASE++;
+					}
+					_BBASE++;
+				}
+			}
+			for (int N = 0; N < NOUTS; N++) {
+				int _N1 = N1;
+				if (N < rN1) _N1++;
+				int _N2 = N2;
+				if (N < rN2) _N2++;
+
+				int _BBASE2 = BBASE2 + N;
+				for (int j = 0; j < N * _N1; j++) {
+					W[WBASE++] = INFINITY;
+				}
+				for (int i = 0; i < _N2; i++, nb[N]++) {
+					for (int j = 0; j < _N1; j++, nw[N]++) {
+						WBASE++;
+					}
+					_BBASE2++;
+				}
+				for (int j = 0; j < (NN[layer - 1] - N - _N2) * _N1; j++) {
+					W[WBASE++] = INFINITY;
+				}
+			}
+			for (int N = 0; N < NOUTS; N++, n_networks++) {
+				int _N1 = N1;
+				if (N < rN1) _N1++;
+				int _N2 = N2;
+				if (N < rN2) _N2++;
+
+				int _BBASE3 = BBASE3 + N;
+				for (int j = 0; j < N * _N2; j++, nw) {
+					W[WBASE++] = INFINITY;
+				}
+				for (int j = 0; j < _N2; j++, nw[N]++) {
+					WBASE++;
+				}
+				for (int j = 0; j < (NN[layer] - N - 1) * _N2; j++) {
+					W[WBASE++] = INFINITY;
+				}
+			}
+			BBASE = BBASE3 + NOUTS;
+		}
+
+		unload_data();
+	}
+
+	virtual bool train(int MAX_EPOCHS) {
+		bool result = true;
+
+		for (int i = 0; i < n_networks; i++)
+			result &= NETWORKS[i]->train(MAX_EPOCHS);
+
+		return result;
+	}
+
+	virtual long double NET(int i, long double* SMIN = NULL, long double* SMAX = NULL,
+		vector<long double>* XX = NULL, vector<long double>* YY = NULL) {
+		int BBASE = 0;
+		n_networks = 0;
+		long double _XX[1024];
+		for (int layer = 2; layer < NL; layer += 3) {
+			int n = layer == 2 ? NInputs : NN[layer - 3];
+			int NOUTS = NN[layer];
+			for (int N = 0; N < NOUTS; N++, n_networks++) {
+				if (layer == 2)
+					for (unsigned int k = 0; k < NInputs; k++)
+						NETWORKS[n_networks]->set_rowX(k, X[k][i]);
+				else
+					for (unsigned int k = 0; k < NETWORKS[n_networks]->NInputs; k++)
+						NETWORKS[n_networks]->set_rowX(k, _XX[k]);
+				_XX[N] = NETWORKS[n_networks]->NET(-1);
+				YN[layer][N] = _XX[N];
+			}
+		}
+
+		return _XX[0];
+	};
+
+	virtual vector<std::string> simplify(bool to_chain, int NVARIANTS, const std::string& OUT_VAR, const std::string& DECLARATOR, const std::string& POSTFIX, set<std::string>& defined) {
+		vector<std::string> result(1);
+
+		for (unsigned int k = 0; k < NInputs; k++) {
+			char var[2] = { 'a' + k , 0 };
+			if (defined.find(var) == defined.end()) {
+				defined.insert(var);
+				if (DECLARATOR.length()) {
+					result[0] += DECLARATOR;
+					result[0] += " ";
+					result[0] += var;
+					result[0] += POSTFIX;
+					result[0] += "\n";
+				}
+			}
+		}
+
+		n_networks = 0;
+		vector<std::string> XX;
+		for (int layer = 2; layer < NL; layer += 3) {
+			int n = layer == 2 ? NInputs : NN[layer - 3];
+			int NOUTS = NN[layer];
+			if (layer != 2) {
+				for (unsigned int k = 0; k < NETWORKS[n_networks]->NInputs; k++) {
+					char var[2] = { 'a' + k, 0 };
+					if (defined.find(var) == defined.end()) {
+						defined.insert(var);
+						result[0] += DECLARATOR;
+						result[0] += " ";
+					}
+					result[0] += var;
+					result[0] += " = ";
+					result[0] += XX[k];
+					result[0] += POSTFIX;
+					result[0] += "\n";
+				}
+			}
+			XX.clear();
+			for (int N = 0; N < NOUTS; N++, n_networks++) {
+				char buf[80];
+				std::string OUTER = std::string("OUT") + __itoa(n_networks, buf, 10);
+				vector<std::string> addition = NETWORKS[n_networks]->simplify(to_chain, 1, OUTER, DECLARATOR, POSTFIX, defined);
+				if (addition.size() == 0)
+					return vector<string>(1, "ERROR!");
+				result[0] += addition[0];
+				result[0] += "\n";
+				XX.push_back(OUTER);
+			}
+		}
+
+		return result;
+	}
+
+	virtual ~block_network() {
+		for (int i = 0; i < n_networks; i++)
+			delete NETWORKS[i];
+	}
+
+	virtual bool equals(network* from) {
+		block_network* _from = dynamic_cast<block_network*>(from);
+		if (_from == NULL)
+			return false;
+		if (NInputs != from->NInputs) return false;
+		if (DAT_FILE_NAME != from->DAT_FILE_NAME) return false;
+		if (NRows != from->NRows) return false;
+		if (NCols != from->NCols) return false;
+		for (int i = 0; i < NCols; i++)
+			if (NCC[i] != from->NCC[i])
+				return false;
+
+		for (int i = 0; i < n_networks; i++)
+			if (!NETWORKS[i]->equals(_from->NETWORKS[i]))
+				return false;
+
+		return true;
+	}
+
+	static std::string create(::list& nlayers, const std::string& dat_file, ::list& inps, int out) = delete;
+
+};
+
 class nnet : public term {
 private:
 	network* net;
@@ -2366,18 +2847,15 @@ public:
 	}
 
 	nnet(const nnet& src) : term("nnet", 1) {
-		string content = src.net->get();
-		this->args.push_back(new ::term(content));
-		net = new network(src.net->fname(), content);
+		this->args.push_back(new ::term(src.args[0]->to_str()));
+		const block_network* bn = dynamic_cast<const block_network*>(src.net);
+		if (bn)
+			net = new block_network(*bn);
+		else
+			net = new network(*src.net);
 	}
 
-	nnet(network* src) : term("nnet", 1) {
-		string content = src->get();
-		this->args.push_back(new ::term(content));
-		net = new network(src->fname(), content);
-	}
-
-	nnet(const std::string & fname, ifstream & in) : term("nnet") {
+	nnet(const std::string & fname, ifstream & in, bool block = false) : term("nnet") {
 		string content;
 		in.seekg(0, std::ios::end);
 		content.reserve(in.tellg());
@@ -2386,10 +2864,27 @@ public:
 		content.assign((std::istreambuf_iterator<char>(in)),
 			std::istreambuf_iterator<char>());
 		this->args.push_back(new ::term(content));
-		net = new network(fname, content);
+		if (block)
+			net = new block_network(fname, content);
+		else
+			net = new network(fname, content);
 	}
 
 	virtual ~nnet() { delete net; }
+
+	virtual value* const_copy(context* CTX, frame_item* f, int unwind = 0) {
+		return copy(CTX, f, unwind);
+	}
+
+	virtual nnet* granularize() {
+		ifstream _IN(net->fname());
+
+		nnet * result = new nnet(net->fname(), _IN, true);
+
+		if (_IN) _IN.close();
+
+		return result;
+	}
 
 	virtual void free() {
 		refs--;
@@ -2401,7 +2896,7 @@ public:
 
 	virtual bool train(int MAX_EPOCHS) { return net->train(MAX_EPOCHS); }
 
-	virtual vector<string> simplify(bool to_chain) { return net->simplify(to_chain); }
+	virtual vector<string> simplify(bool to_chain, const std::string & DECLARATOR, const std::string & POSTFIX, set<std::string> & defined) { return net->simplify(to_chain, net->HOW_MANY, "", DECLARATOR, POSTFIX, defined); }
 
 	virtual long double sim() { return net->sim(); }
 	virtual unsigned int nX() { return net->nX(); }
@@ -2428,6 +2923,10 @@ public:
 		}
 		else
 			return term::unify(CTX, ff, from);
+	}
+
+	virtual string to_str(bool simple = false) {
+		return get_content();
 	}
 };
 
@@ -8980,8 +9479,8 @@ public:
 	virtual const string get_id() { return "nsimplify"; }
 
 	virtual generated_vars* generate_variants(context* CTX, frame_item* f, vector<value*>*& positional_vals) {
-		if (positional_vals->size() != 2 && positional_vals->size() != 3) {
-			std::cout << "nsimplify(IN,OUT) or nsimplify(IN,to_chain,OUT): incorrect number of arguments!" << endl;
+		if (positional_vals->size() != 2 && positional_vals->size() != 3 && positional_vals->size() != 4) {
+			std::cout << "nsimplify(IN,OUT[,Style]) or nsimplify(IN,to_chain,OUT[,Style]): incorrect number of arguments!" << endl;
 			exit(-3);
 		}
 		generated_vars* result = new generated_vars();
@@ -8991,23 +9490,34 @@ public:
 
 		bool d1 = positional_vals->at(0)->defined();
 		if (!d1) {
-			std::cout << "nsimplify(IN,OUT) or nsimplify(IN,to_chain,OUT) indeterminated!" << endl;
+			std::cout << "nsimplify(IN,OUT[,Style]) or nsimplify(IN,to_chain,OUT[,Style]) indeterminated!" << endl;
 			exit(-3);
 		}
 		nnet* in = dynamic_cast<nnet*>(positional_vals->at(0));
 		if (!in) {
-			std::cout << "nsimplify(IN,OUT) or nsimplify(IN,to_chain,OUT) : IN is not a neural net!" << endl;
+			std::cout << "nsimplify(IN,OUT[,Style]) or nsimplify(IN,to_chain,OUT[,Style]) : IN is not a neural net!" << endl;
 			exit(-3);
 		}
 		term* t2 = dynamic_cast<term*>(positional_vals->at(1));
-		bool to_chain = positional_vals->size() == 3 && positional_vals->at(1)->defined() && t2 && t2->get_name() == "to_chain";
+		bool to_chain = positional_vals->size() >= 3 && positional_vals->at(1)->defined() && t2 && t2->get_name() == "to_chain";
 		size_t n3 = positional_vals->size() - 1;
+		term* STYLE = dynamic_cast<term*>(positional_vals->at(n3));
+		if (STYLE) n3--;
 		vector<string> Vars;
 		vector<string> BEST;
 		size_t p = 0;
 		ITEM* r = static_cast<SUM*>(prolog->deserialize_symbolic(in->get_name(), p, Vars));
-		if (r)
-			BEST = in->simplify(to_chain);
+		if (r) {
+			set<std::string> defined;
+			if (STYLE) {
+				string style = STYLE->get_name();
+				if (style == "c" || style == "c++")
+					BEST = in->simplify(to_chain, "double", ";", defined);
+				else
+					BEST = in->simplify(to_chain, "", "", defined);
+			} else
+				BEST = in->simplify(to_chain, "", "", defined);
+		}
 		stack_container<value*> OUT_LIST;
 		for (string V : BEST)
 			OUT_LIST.push_back(new term(V));
@@ -9063,6 +9573,44 @@ public:
 		}
 		_out << content;
 		_out.close();
+		return result;
+	}
+};
+
+class predicate_item_granularize : public predicate_item {
+public:
+	predicate_item_granularize(bool _neg, bool _once, bool _call, int num, clause* c, interpreter* _prolog) : predicate_item(_neg, _once, _call, num, c, _prolog) {
+		determined = false;
+	}
+
+	virtual const string get_id() { return "granularize"; }
+
+	virtual generated_vars* generate_variants(context* CTX, frame_item* f, vector<value*>*& positional_vals) {
+		if (positional_vals->size() != 2) {
+			std::cout << "granularize(IN, OUT): incorrect number of arguments!" << endl;
+			exit(-3);
+		}
+		generated_vars* result = new generated_vars();
+		frame_item* ff = f->copy(CTX);
+
+		result->push_back(ff);
+
+		if (!positional_vals->at(0)->defined()) {
+			std::cout << "granularize(IN, OUT) indeterminated!" << endl;
+			exit(-3);
+		}
+		nnet* in = dynamic_cast<nnet*>(positional_vals->at(0));
+		nnet* out = dynamic_cast<nnet*>(positional_vals->at(1));
+		if (!in || !out && positional_vals->at(1)->defined()) {
+			std::cout << "granularize(IN, OUT) : incorrect arguments types!" << endl;
+			exit(-3);
+		}
+		nnet * _out = in->granularize();
+		if (!_out || !positional_vals->at(1)->unify(CTX, ff, _out)) {
+			delete result;
+			result = NULL;
+			delete ff;
+		}
 		return result;
 	}
 };
@@ -11631,6 +12179,9 @@ string interpreter::parse_clause(context * CTX, vector<string> & renew, frame_it
 							else if (_iid == id_nsimplify) {
 								pi = new predicate_item_nsimplify(neg, once, call, num, cl, this);
 							}
+							else if (_iid == id_granularize) {
+								pi = new predicate_item_granularize(neg, once, call, num, cl, this);
+								}
 							else if (_iid == id_nnetff) {
 								pi = new predicate_item_nnetff(neg, once, call, num, cl, this);
 							}
