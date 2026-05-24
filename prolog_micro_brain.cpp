@@ -34,6 +34,10 @@
 #include "prolog_micro_brain.h"
 #include "symbolic.h"
 
+#ifdef __APPLE__
+#include <mlx/mlx.h>
+#endif
+
 #ifndef _MSC_VER
 HMODULE LoadLibrary(const wchar_t* _fname) {
 	return dlopen(wstring_to_utf8(_fname).c_str(), RTLD_LAZY);
@@ -1256,7 +1260,9 @@ public:
 	int NN[1024];
 	long double best_err;
 
-	long double YN[1024][1024] = { 0.0 };
+	static const int MAXTHREADS = 6;
+
+	long double YN[MAXTHREADS][1024][1024] = { 0.0 };
 
 	long double MMIN[512];
 	long double MMAX[512];
@@ -1281,6 +1287,11 @@ public:
 	long double* Y = NULL;
 	long double* YS = NULL;
 	long double* ERR = NULL;
+
+	int coord_b[1024];
+	double d_b[1024];
+	int coord_w[1024];
+	double d_w[1024];
 
 	typedef struct {
 		int kind;
@@ -1610,51 +1621,185 @@ public:
 		return 1.0 / (1.0 + exp(-s));
 	};
 
-	virtual long double NET(int i, long double* SMIN = NULL, long double* SMAX = NULL,
+	virtual long double PERTURBED_NET(int i, long double* SMIN = NULL, long double* SMAX = NULL,
 		vector<long double>* XX = NULL, vector<long double>* YY = NULL) {
+		int id = omp_get_thread_num();
+
+		long double* _W = new long double[NW];
+		long double* _B = new long double[NB];
+		memmove(_W, this->W, NW * sizeof(long double));
+		memmove(_B, this->B, NB * sizeof(long double));
+
+		_W[coord_w[id]] += d_w[id];
+		_B[coord_b[id]] += d_b[id];
+
 		for (int i = 0; i < NL - 1; i++)
-			memset(&YN[i], 0, NN[i] * sizeof(long double));
+			memset(&YN[id][i], 0, NN[i] * sizeof(long double));
 		int ptr = 0;
 		if (i >= 0)
 			for (int j = 0; j < NInputs; j++)
 				for (int k = 0; k < NN[0]; k++, ptr++)
-					YN[0][k] += W[ptr] * X[j][i];
+					YN[id][0][k] += _W[ptr] * X[j][i];
 		else
 			for (int j = 0; j < NInputs; j++)
 				for (int k = 0; k < NN[0]; k++, ptr++)
-					YN[0][k] += W[ptr] * tempX[j];
+					YN[id][0][k] += _W[ptr] * tempX[j];
 		int ptr1 = 0;
 		for (int k = 0; k < NN[0]; k++, ptr1++) {
-			YN[0][k] += B[ptr1];
+			YN[id][0][k] += _B[ptr1];
 			if (SMIN && SMAX) {
-				if (YN[0][k] < SMIN[k]) SMIN[k] = YN[0][k];
-				if (YN[0][k] > SMAX[k]) SMAX[k] = YN[0][k];
+				if (YN[id][0][k] < SMIN[k]) SMIN[k] = YN[id][0][k];
+				if (YN[id][0][k] > SMAX[k]) SMAX[k] = YN[id][0][k];
 			}
-			if (XX) XX[k].push_back(YN[0][k]);
-			YN[0][k] = S(YN[0][k]);
-			if (YY) YY[k].push_back(YN[0][k]);
+			if (XX) XX[k].push_back(YN[id][0][k]);
+			YN[id][0][k] = S(YN[id][0][k]);
+			if (YY) YY[k].push_back(YN[id][0][k]);
 		}
 
 		for (int layer = 1; layer < NL - 1; layer++) {
 			for (int j = 0; j < NN[layer - 1]; j++)
 				for (int k = 0; k < NN[layer]; k++, ptr++)
-					YN[layer][k] += W[ptr] * YN[layer - 1][j];
+					YN[id][layer][k] += _W[ptr] * YN[id][layer - 1][j];
 			for (int k = 0; k < NN[layer]; k++, ptr1++) {
-				YN[layer][k] += B[ptr1];
+				YN[id][layer][k] += _B[ptr1];
 				if (SMIN && SMAX) {
-					if (YN[layer][k] < SMIN[ptr1]) SMIN[ptr1] = YN[layer][k];
-					if (YN[layer][k] > SMAX[ptr1]) SMAX[ptr1] = YN[layer][k];
+					if (YN[id][layer][k] < SMIN[ptr1]) SMIN[ptr1] = YN[id][layer][k];
+					if (YN[id][layer][k] > SMAX[ptr1]) SMAX[ptr1] = YN[id][layer][k];
 				}
-				if (XX) XX[ptr1].push_back(YN[layer][k]);
-				YN[layer][k] = S(YN[layer][k]);
-				if (YY) YY[ptr1].push_back(YN[layer][k]);
+				if (XX) XX[ptr1].push_back(YN[id][layer][k]);
+				YN[id][layer][k] = S(YN[id][layer][k]);
+				if (YY) YY[ptr1].push_back(YN[id][layer][k]);
 			}
 		}
 
+		long double res = _B[ptr1];
+		for (int k = 0; k < NN[NL - 2]; k++, ptr++) {
+			res += YN[id][NL - 2][k] * _W[ptr];
+		}
+		if (XX) XX[ptr1].push_back(res);
+		if (YY) YY[ptr1].push_back(res);
+
+		if (SMIN && SMAX) {
+			int idx = 0;
+			for (int i = 0; i < NL - 1; i++)
+				idx += NN[i];
+			if (res < SMIN[idx]) SMIN[idx] = res;
+			if (res > SMAX[idx]) SMAX[idx] = res;
+		}
+
+		delete[] _B;
+		delete[] _W;
+
+		return res;
+	}
+
+	virtual long double NET(int i, long double* SMIN = NULL, long double* SMAX = NULL,
+		vector<long double>* XX = NULL, vector<long double>* YY = NULL) {
+		int id = omp_get_thread_num();
+		for (int i = 0; i < NL - 1; i++)
+			memset(&YN[id][i], 0, NN[i] * sizeof(long double));
+#ifdef __APPLE__
+		vector<double> _X(NInputs);
+		if (i >= 0)
+			for (int j = 0; j < NInputs; j++)
+				_X[j] = X[j][i];
+		else
+			for (int j = 0; j < NInputs; j++)
+				_X[j] = tempX[j];
+		vector<double> _W(NW);
+		for (int j = 0; j < NW; j++)
+			_W[j] = W[j];
+		vector<double> _B(NB);
+		for (int j = 0; j < NB; j++)
+			_B[j] = B[j];
+#endif
+		int ptr = 0;
+#ifdef __APPLE__
+		auto __X = mlx::core::array(_X.data(), { NInputs }, mlx::core::float64);
+
+		auto __W0 = mlx::core::array(_W.data(), { NInputs, NN[0] }, mlx::core::float64);
+		auto __B0 = mlx::core::array(_B.data(), { NN[0] }, mlx::core::float64);
+		auto __Y0 = mlx::core::matmul(__X, __W0.T()) + __B0;
+		for (int k = 0; k < NN[0]; k++)
+			YN[id][0][k] = __Y0[k];
+		ptr += NInputs * NN[0];
+		int ptr1 = 0;
+		for (int k = 0; k < NN[0]; k++, ptr1++) {
+			if (SMIN && SMAX) {
+				if (YN[id][0][k] < SMIN[k]) SMIN[k] = YN[id][0][k];
+				if (YN[id][0][k] > SMAX[k]) SMAX[k] = YN[id][0][k];
+			}
+			if (XX) XX[k].push_back(YN[id][0][k]);
+			YN[id][0][k] = S(YN[id][0][k]);
+			__Y0[k] = YN[id][0][k];
+			if (YY) YY[k].push_back(YN[id][0][k]);
+		}
+		for (int layer = 1; layer < NL - 1; layer++) {
+			auto __W1 = mlx::core::array(_W.data()+ptr, { NN[layer-1], NN[layer]}, mlx::core::float64);
+			auto __B1 = mlx::core::array(_B.data()+ptr1, { NN[layer] }, mlx::core::float64);
+			__Y0 = mlx::core::matmul(__Y0, __W1.T()) + __B1;
+			ptr += NN[layer - 1] * NN[layer];
+			for (int k = 0; k < NN[layer]; k++)
+				YN[id][layer][k] = __Y0[j];
+			for (int k = 0; k < NN[layer]; k++, ptr1++) {
+				if (SMIN && SMAX) {
+					if (YN[id][layer][k] < SMIN[ptr1]) SMIN[ptr1] = YN[id][layer][k];
+					if (YN[id][layer][k] > SMAX[ptr1]) SMAX[ptr1] = YN[id][layer][k];
+				}
+				if (XX) XX[ptr1].push_back(YN[id][layer][k]);
+				YN[id][layer][k] = S(YN[id][layer][k]);
+				__Y0[k] = YN[id][layer][k];
+				if (YY) YY[ptr1].push_back(YN[id][layer][k]);
+			}
+		}
+		auto __W2 = mlx::core::array(_W.data() + ptr, { NN[NL-2] }, mlx::core::float64);
+		ptr += NN[NL - 2];
+		__Y0 = mlx::core::matmul(__Y0, __W2.T());
+		long double res = B[ptr1] + __Y0[0];
+#else
+		if (i >= 0) {
+			for (int j = 0; j < NInputs; j++)
+				for (int k = 0; k < NN[0]; k++, ptr++)
+					YN[id][0][k] += W[ptr] * X[j][i];
+		}
+		else {
+			for (int j = 0; j < NInputs; j++)
+				for (int k = 0; k < NN[0]; k++, ptr++)
+					YN[id][0][k] += W[ptr] * tempX[j];
+		}
+		int ptr1 = 0;
+		for (int k = 0; k < NN[0]; k++, ptr1++) {
+			YN[id][0][k] += B[ptr1];
+			if (SMIN && SMAX) {
+				if (YN[id][0][k] < SMIN[k]) SMIN[k] = YN[id][0][k];
+				if (YN[id][0][k] > SMAX[k]) SMAX[k] = YN[id][0][k];
+			}
+			if (XX) XX[k].push_back(YN[id][0][k]);
+			YN[id][0][k] = S(YN[id][0][k]);
+			if (YY) YY[k].push_back(YN[id][0][k]);
+		}
+
+		for (int layer = 1; layer < NL - 1; layer++) {
+			for (int j = 0; j < NN[layer - 1]; j++)
+				for (int k = 0; k < NN[layer]; k++, ptr++)
+					YN[id][layer][k] += W[ptr] * YN[id][layer - 1][j];
+			for (int k = 0; k < NN[layer]; k++, ptr1++) {
+				YN[id][layer][k] += B[ptr1];
+				if (SMIN && SMAX) {
+					if (YN[id][layer][k] < SMIN[ptr1]) SMIN[ptr1] = YN[id][layer][k];
+					if (YN[id][layer][k] > SMAX[ptr1]) SMAX[ptr1] = YN[id][layer][k];
+				}
+				if (XX) XX[ptr1].push_back(YN[id][layer][k]);
+				YN[id][layer][k] = S(YN[id][layer][k]);
+				if (YY) YY[ptr1].push_back(YN[id][layer][k]);
+			}
+		}
 		long double res = B[ptr1];
 		for (int k = 0; k < NN[NL - 2]; k++, ptr++) {
-			res += YN[NL - 2][k] * W[ptr];
+			res += YN[id][NL - 2][k] * W[ptr];
 		}
+#endif
+
 		if (XX) XX[ptr1].push_back(res);
 		if (YY) YY[ptr1].push_back(res);
 
@@ -1696,13 +1841,81 @@ public:
 		auto rng = std::default_random_engine{ rd() };
 		std::shuffle(idxs.begin(), idxs.end(), rng);
 
+		int nProbes = min(MAXTHREADS, max(omp_get_num_procs(), 3));
+
+		long double YYS = 1E300;
+		long double DD[1024];
+		int* rands[1024];
+		for (int i = 0; i < nProbes; i++)
+			rands[i] = new int[NRows * 300];
+
 		do {
 			err = 0.0;
+			for (int i = 0; i < nProbes; i++)
+				for (int j = 0; j < NRows * 300; j++)
+					rands[i][j] = rand();
+			#pragma omp parallel for num_threads(nProbes) schedule(static, 1)
+			for (int probe = 0; probe < nProbes; probe++) {
+				int id = omp_get_thread_num();
+				int rc = 0;
+				DD[id] = 1E300;
+				int w = 0, b = 0;
+				long double ww = 0.0, bb = 0.0;
+				for (int tries = 0; tries < 3; tries++) {
+					long double dd = 0.0;
+					for (int ii = 0; ii < NRows; ii++) {
+						int i = idxs[ii];
+
+						do {
+							coord_b[id] = rands[id][rc++] % NB;
+							if (!isinf(B[coord_b[id]])) {
+								d_b[id] = 0.05 - 0.1 * rands[id][rc++] / RAND_MAX;
+								break;
+							}
+						} while (true);
+						do {
+							coord_w[id] = rands[id][rc++] % NW;
+							if (!isinf(W[coord_w[id]])) {
+								d_w[id] = 0.05 - 0.1 * rands[id][rc++] / RAND_MAX;
+								break;
+							}
+						} while (true);
+						long double ys = PERTURBED_NET(i);
+						long double delta = ys - Y[i];
+						dd += delta * delta;
+					}
+					if (dd < DD[id]) {
+						w = coord_w[id];
+						b = coord_b[id];
+						ww = d_w[id];
+						bb = d_b[id];
+						DD[id] = dd;
+					}
+				}
+				coord_w[id] = w;
+				coord_b[id] = b;
+				d_w[id] = ww;
+				d_b[id] = bb;
+			}
+			int best = 0;
+			for (int probe = 1; probe < nProbes; probe++)
+				if (DD[probe] < DD[best]) {
+					best = probe;
+				}
+			if (DD[best] < YYS) {
+				B[coord_b[best]] += d_b[best];
+				W[coord_w[best]] += d_w[best];
+			}
+			long double YYS0 = YYS;
+			YYS = 0.0;
 			for (int ii = 0; ii < NRows; ii++) {
 				int i = idxs[ii];
 
 				YS[i] = NET(i);
 				long double delta = YS[i] - Y[i];
+
+				YYS += delta * delta;
+
 				ERR[i] = fabs(delta);
 				err += ERR[i];
 
@@ -1711,7 +1924,7 @@ public:
 
 				int ptr = NW - 1;
 				for (int k = NN[NL - 2] - 1; k >= 0; k--, ptr--) {
-					DW[ptr] = isinf(W[ptr]) ? 0.0 : alpha * DW[ptr] + (1 - alpha) * (-nu * delta * YN[NL - 2][k]);
+					DW[ptr] = isinf(W[ptr]) ? 0.0 : alpha * DW[ptr] + (1 - alpha) * (-nu * delta * YN[0][NL - 2][k]);
 					W[ptr] += DW[ptr];
 				}
 
@@ -1719,7 +1932,7 @@ public:
 
 				ptr = NW - 1;
 				for (int k = NN[NL - 2] - 1; k >= 0; k--, ptr--) {
-					deltas[k] = YN[NL - 2][k] * (1.0 - YN[NL - 2][k]) * delta * W[ptr];
+					deltas[k] = YN[0][NL - 2][k] * (1.0 - YN[0][NL - 2][k]) * delta * W[ptr];
 				}
 
 				int ptrw = ptr;
@@ -1728,7 +1941,7 @@ public:
 					ptr = ptrw;
 					for (int j = NN[layer - 1] - 1; j >= 0; j--)
 						for (int k = NN[layer] - 1; k >= 0; k--, ptrw--) {
-							DW[ptrw] = isinf(W[ptrw]) ? 0.0 : alpha * DW[ptrw] + (1 - alpha) * (-nu * deltas[k] * YN[layer - 1][j]);
+							DW[ptrw] = isinf(W[ptrw]) ? 0.0 : alpha * DW[ptrw] + (1 - alpha) * (-nu * deltas[k] * YN[0][layer - 1][j]);
 							W[ptrw] += DW[ptrw];
 						}
 					for (int k = NN[layer] - 1; k >= 0; k--, ptrb--) {
@@ -1740,7 +1953,7 @@ public:
 
 					for (int j = NN[layer - 1] - 1; j >= 0; j--)
 						for (int k = NN[layer] - 1; k >= 0; k--, ptr--) {
-							deltas1[j] += YN[layer - 1][j] * (1.0 - YN[layer - 1][j]) * deltas[k] * W[ptr];
+							deltas1[j] += YN[0][layer - 1][j] * (1.0 - YN[0][layer - 1][j]) * deltas[k] * W[ptr];
 						}
 					for (int j = 0; j < NN[layer - 1]; j++)
 						deltas[j] = deltas1[j];
@@ -1759,7 +1972,8 @@ public:
 			err /= NRows;
 			if (epochs % 100 == 0) {
 				real_err = 0.0;
-				for (int i = 0; i < NRows; i++) {
+				for (int ii = 0; ii < NRows; ii++) {
+					int i = idxs[ii];
 					YS[i] = NET(i);
 					long double delta = YS[i] - Y[i];
 					real_err += fabs(delta);
@@ -1767,7 +1981,12 @@ public:
 				printf("%i epochs reached, err = [%lf (really = %lf) / %i] = %lf (really = %lf)\n", epochs, (double)(err * NRows), real_err, NRows, (double)err, (double)(real_err / NRows));
 				fflush(stdout);
 			}
+			if (YYS > YYS0)
+				std::shuffle(idxs.begin(), idxs.end(), rng);
 		} while (err > tol && epochs++ < MAX_EPOCHS);
+
+		for (int i = 0; i < nProbes; i++)
+			delete[] rands[i];
 
 		bool result = real_err < best_err;
 
@@ -2260,50 +2479,25 @@ public:
 					printf("\n");
 					string SNET;
 					SNET.reserve(128 * 1024 * 1024);
-					_S->sprint(Vars, maxPows, &SNET);
+					_S->sprint(Vars, maxPows, &SNET, true);
 					SNET += "\n";
 					unsigned long long used_mask = 0;
 					_S->CHECK_VARS(used_mask, NInputs, Vars, *_zvars);
-					unsigned long long k = ONE64;
-					for (int pv = 0; pv < NInputs; pv++) {
-						if (used_mask & k) {
-							string _DEF = Vars[pv];
-							for (int ppv = 2; ppv <= maxPows[pv]; ppv++) {
-								_DEF += "*";
-								_DEF += Vars[pv];
-								string CUR = Vars[pv];
-								char Num[32] = "";
-								_sprintf1(Num, 32, "%u", ppv);
-								CUR += Num;
-								if (defined.find(CUR) == defined.end()) {
-									defined.insert(CUR);
-									*Buf += DECLARATOR;
-									*Buf += " ";
-								}
-								*Buf += CUR;
-								*Buf += "=";
-								*Buf += _DEF;
-								_DEF = CUR;
-								*Buf += POSTFIX;
-								*Buf += "\n";
-							}
-						}
-						k <<= 1;
-					}
+					unsigned long long k = ONE64 << NInputs;
 					// The last layer is LINEAR. z[last] is not considered (= OUT)
 					for (z_it = _zvars->begin(); z_it != _z_last; z_it++, k <<= 1)
 						if (used_mask & k) {
 							ITEM* z_S = z_it->second;
 							string* zBuf = new string("");
 							zBuf->reserve(32 * 1024 * 1024);
-							z_S->sprint(Vars, maxPows, zBuf);
+							z_S->sprint(Vars, maxPows, zBuf, true);
 							if (defined.find(z_it->first) == defined.end()) {
 								defined.insert(z_it->first);
 								*Buf += DECLARATOR;
 								*Buf += " ";
 							}
 							*Buf += z_it->first.c_str();
-							*Buf += " = sqrt(";
+							*Buf += " = nsqrt(";
 							*Buf += *zBuf;
 							*Buf += ")";
 							*Buf += POSTFIX;
@@ -2636,7 +2830,7 @@ public:
 		}
 
 		for (int i = 0; i < NRows; i++) {
-			YN[NL - 1][0] = network::NET(i);
+			YN[0][NL - 1][0] = network::NET(i);
 
 			n_networks = 0;
 			BBASE = 0;
@@ -2645,10 +2839,10 @@ public:
 				int NOUTS = NN[layer];
 				for (int N = 0; N < NOUTS; N++, n_networks++) {
 					for (int j = 0; j < n; j++) {
-						double x = layer == 2 ? X[j][i] : YN[layer - 3][j];
+						double x = layer == 2 ? X[j][i] : YN[0][layer - 3][j];
 						NETWORKS[n_networks]->X[j][i] = x;
 					}
-					double y = YN[layer][N];
+					double y = YN[0][layer][N];
 					NETWORKS[n_networks]->Y[i] = y;
 				}
 			}
@@ -2734,8 +2928,33 @@ public:
 		return result;
 	}
 
+	virtual long double PERTURBED_NET(int i, long double* SMIN = NULL, long double* SMAX = NULL,
+		vector<long double>* XX = NULL, vector<long double>* YY = NULL) {
+		int id = omp_get_thread_num();
+		int BBASE = 0;
+		n_networks = 0;
+		long double _XX[1024];
+		for (int layer = 2; layer < NL; layer += 3) {
+			int n = layer == 2 ? NInputs : NN[layer - 3];
+			int NOUTS = NN[layer];
+			for (int N = 0; N < NOUTS; N++, n_networks++) {
+				if (layer == 2)
+					for (unsigned int k = 0; k < NInputs; k++)
+						NETWORKS[n_networks]->set_rowX(k, X[k][i]);
+				else
+					for (unsigned int k = 0; k < NETWORKS[n_networks]->NInputs; k++)
+						NETWORKS[n_networks]->set_rowX(k, _XX[k]);
+				_XX[N] = NETWORKS[n_networks]->PERTURBED_NET(-1);
+				YN[id][layer][N] = _XX[N];
+			}
+		}
+
+		return _XX[0];
+	};
+
 	virtual long double NET(int i, long double* SMIN = NULL, long double* SMAX = NULL,
 		vector<long double>* XX = NULL, vector<long double>* YY = NULL) {
+		int id = omp_get_thread_num();
 		int BBASE = 0;
 		n_networks = 0;
 		long double _XX[1024];
@@ -2750,7 +2969,7 @@ public:
 					for (unsigned int k = 0; k < NETWORKS[n_networks]->NInputs; k++)
 						NETWORKS[n_networks]->set_rowX(k, _XX[k]);
 				_XX[N] = NETWORKS[n_networks]->NET(-1);
-				YN[layer][N] = _XX[N];
+				YN[id][layer][N] = _XX[N];
 			}
 		}
 
@@ -9511,12 +9730,74 @@ public:
 			set<std::string> defined;
 			if (STYLE) {
 				string style = STYLE->get_name();
-				if (style == "c" || style == "c++")
+				if (style == "c" || style == "c++") {
 					BEST = in->simplify(to_chain, "double", ";", defined);
-				else
+					BEST[0] = string(
+						"inline auto nsqrt(double x) {\n"
+						"   return x < 0.0 ? sqrt(-x) : sqrt(x);\n"
+						"}\n"
+						"inline constexpr auto npow(double a, int p) {\n"
+						"	if (p == 0)\n"
+						"		return 1.0;\n"
+						"	else if (p == 1)\n"
+						"		return a;\n"
+						"	else if (p == 2)\n"
+						"		return a * a;\n"
+						"	else if (p == 3)\n"
+						"		return a * a * a;\n"
+						"	else if (p == 4)\n"
+						"		return a * a * a * a;\n"
+						"	else if (p == 5)\n"
+						"		return a * a * a * a * a;\n"
+						"	else if (p == 6)\n"
+						"		return a * a * a * a * a * a;\n"
+						"	else if (p == 7)\n"
+						"		return a * a * a * a * a * a * a;\n"
+						"	else if (p == 8)\n"
+						"		return a * a * a * a * a * a * a * a;\n"
+						"	else if (p == 9)\n"
+						"		return a * a * a * a * a * a * a * a * a;\n"
+						"	else if (p == 10)\n"
+						"		return a * a * a * a * a * a * a * a * a * a;\n"
+						"	else if (p == 11)\n"
+						"		return a * a * a * a * a * a * a * a * a * a * a;\n"
+						"	else if (p == 12)\n"
+						"		return a * a * a * a * a * a * a * a * a * a * a * a;\n"
+						"	else if (p == 13)\n"
+						"		return a * a * a * a * a * a * a * a * a * a * a * a * a;\n"
+						"	else if (p == 14)\n"
+						"		return a * a * a * a * a * a * a * a * a * a * a * a * a * a;\n"
+						"	else if (p == 15)\n"
+						"		return a * a * a * a * a * a * a * a * a * a * a * a * a * a * a;\n"
+						"	else if (p == 16)\n"
+						"		return a * a * a * a * a * a * a * a * a * a * a * a * a * a * a * a;\n"
+						"	else if (p == 17)\n"
+						"		return a * a * a * a * a * a * a * a * a * a * a * a * a * a * a * a * a;\n"
+						"	else if (p == 18)\n"
+						"		return a * a * a * a * a * a * a * a * a * a * a * a * a * a * a * a * a * a;\n"
+						"	else if (p == 19)\n"
+						"		return a * a * a * a * a * a * a * a * a * a * a * a * a * a * a * a * a * a * a;\n"
+						"	else if (p == 20)\n"
+						"		return a * a * a * a * a * a * a * a * a * a * a * a * a * a * a * a * a * a * a * a;\n"
+						"	else\n"
+						"		return ::pow(a, p);\n"
+						"}\n") + BEST[0];
+				}
+				else {
 					BEST = in->simplify(to_chain, "", "", defined);
-			} else
+					BEST[0] = string(
+						"def nsqrt(x):\n"
+						"   return sqrt(-x) if x < 0.0 else sqrt(x)\n"
+						"\n") + BEST[0];
+				}
+			}
+			else {
 				BEST = in->simplify(to_chain, "", "", defined);
+				BEST[0] = string(
+					"def nsqrt(x):\n"
+					"   return sqrt(-x) if x < 0.0 else sqrt(x)\n"
+					"\n") + BEST[0];
+			}
 		}
 		stack_container<value*> OUT_LIST;
 		for (string V : BEST)

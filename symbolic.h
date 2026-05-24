@@ -1218,20 +1218,22 @@ void MUL::sprint(char ** Vars, int * maxPows, string * Buf, bool insert_pow_op) 
 			}
 		} else {
 			if (fabs(1.0-pows[i]) > 1E-9) {
-				*Buf += "(";
-				*Buf += Vars[vars[i]];
 				char Num[32] = "";
 				_sprintf1(Num, 32, "%Lf", fabs(pows[i]));
 				STRIP(Num);
-				if (insert_pow_op)
-					*Buf += "^";
 				if (!strchr(Num, '.') && !strchr(Num, ','))
 					if (fabs(pows[i]) - maxPows[vars[i]] > 1E-9)
 						maxPows[vars[i]] = (int)(0.5 + fabs(pows[i]));
-				if (pows[i] >= 0.0)
-					_sprintf1(_Buf, 16384*64*16, "%s)", Num);
+				if (insert_pow_op)
+					if (pows[i] >= 0.0)
+						_sprintf2(_Buf, 16384 * 64 * 16, "pow(%s,%s)", Vars[vars[i]], Num);
+					else
+						_sprintf2(_Buf, 16384 * 64 * 16, "(1.0/pow(%s,%s))", Vars[vars[i]], Num);
 				else
-					_sprintf1(_Buf, 16384*64*16, "1.0/(%s))", Num);
+					if (pows[i] >= 0.0)
+						_sprintf2(_Buf, 16384 * 64 * 16, "((%s)^(%s))", Vars[vars[i]], Num);
+					else
+						_sprintf2(_Buf, 16384 * 64 * 16, "(1.0/((%s)^(%s)))", Vars[vars[i]], Num);
 				*Buf += _Buf;
 			} else
 				*Buf += Vars[vars[i]];
