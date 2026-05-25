@@ -25,18 +25,7 @@
 #include <string>
 #include <chrono>
 
-#ifdef _OPENMP
 #include <omp.h>
-#else
-typedef int omp_lock_t;
-void omp_init_lock(omp_lock_t *) { }
-void omp_set_lock(omp_lock_t *) { }
-void omp_unset_lock(omp_lock_t *) { }
-void omp_destroy_lock(omp_lock_t *) { }
-int omp_get_thread_num() { return 0; }
-int omp_get_num_procs() { return 1; }
-double omp_get_wtime() { return std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count(); }
-#endif
 
 static int NPROCS = 1;
 
