@@ -8,6 +8,33 @@ bool _isnan(double x) {
 }
 #endif
 
+#ifndef _MSC_VER
+unsigned long long getTotalSystemMemory()
+{
+	long pages = sysconf(_SC_PHYS_PAGES);
+	long page_size = sysconf(_SC_PAGE_SIZE);
+	return (long long)pages * page_size;
+}
+unsigned int getTotalProcs()
+{
+	return sysconf(_SC_NPROCESSORS_ONLN);
+}
+#else
+unsigned long long getTotalSystemMemory()
+{
+	MEMORYSTATUSEX status = { 0 };
+	status.dwLength = sizeof(status);
+	GlobalMemoryStatusEx(&status);
+	return status.ullTotalPhys;
+}
+unsigned int getTotalProcs()
+{
+	SYSTEM_INFO sysinfo = { 0 };
+	GetSystemInfo(&sysinfo);
+	return sysinfo.dwNumberOfProcessors;
+}
+#endif
+
 clock_rdtsc __clock() {
 	auto duration = std::chrono::system_clock().now().time_since_epoch();
 	return std::chrono::duration_cast<std::chrono::nanoseconds>(duration).count();
@@ -451,6 +478,7 @@ string term::export_str(bool simple, bool double_slashes) {
 }
 
 network::network(const network& src) {
+	MAXPROBES = max(2, (int)(getTotalSystemMemory() / ((long long)1024 * 1024 * 1024)));
 	YN = new LAYER[MAXPROBES];
 	NInputs = src.NInputs;
 	FNAME = src.FNAME;
@@ -525,6 +553,7 @@ network::network(const network& src) {
 }
 
 network::network(const std::string& FName, const std::string& content) {
+	MAXPROBES = max(2, (int)(getTotalSystemMemory() / ((long long)1024 * 1024 * 1024)));
 	YN = new LAYER[MAXPROBES];
 	FNAME = FName;
 	istringstream NET(content);
@@ -638,6 +667,7 @@ network::network(const std::string& FName, const std::string& content) {
 }
 
 network::network(network* templ, int ni, int n1, int n2, bool first, bool last) {
+	MAXPROBES = max(2, (int)(getTotalSystemMemory() / ((long long)1024 * 1024 * 1024)));
 	YN = new LAYER[MAXPROBES];
 	FNAME = templ->FNAME;
 
@@ -1123,7 +1153,7 @@ bool network::train(int MAX_EPOCHS) {
 		double stop = !probed ? omp_get_wtime() : 0.0;
 		if (!probed) {
 			double time = stop - start;
-			if (time < 1.0 * best_time) {
+			if (time < 1.025 * best_time) {
 				best_time = time;
 				best_nProbes = nProbes;
 				best_nCPUs = nCPUs;
@@ -1648,7 +1678,7 @@ long double* network::MNK_of_X(int N, const vector<long double> W, const vector<
 block_network::block_network(const block_network& src) : network(src) {
 	n_networks = src.n_networks;
 	NETWORKS = new network * [n_networks];
-	for (int i = 0; i < n_networks; i++)
+	for (unsigned int i = 0; i < n_networks; i++)
 		NETWORKS[i] = new network(*src.NETWORKS[i]);
 }
 
@@ -1832,7 +1862,7 @@ block_network::block_network(const std::string& FName, const std::string& conten
 bool block_network::train(int MAX_EPOCHS) {
 	bool result = true;
 
-	for (int i = 0; i < n_networks; i++)
+	for (unsigned int i = 0; i < n_networks; i++)
 		result &= NETWORKS[i]->train(MAX_EPOCHS);
 
 	return result;
@@ -1848,10 +1878,10 @@ long double block_network::PERTURBED_NET(int i, long double* SMIN, long double* 
 		int NOUTS = NN[layer];
 		for (int N = 0; N < NOUTS; N++, n_networks++) {
 			if (layer == 2)
-				for (unsigned int k = 0; k < NInputs; k++)
+				for (int k = 0; k < NInputs; k++)
 					NETWORKS[n_networks]->set_rowX(k, X[k][i]);
 			else
-				for (unsigned int k = 0; k < NETWORKS[n_networks]->NInputs; k++)
+				for (int k = 0; k < NETWORKS[n_networks]->NInputs; k++)
 					NETWORKS[n_networks]->set_rowX(k, _XX[k]);
 			_XX[N] = NETWORKS[n_networks]->PERTURBED_NET(-1);
 			YN[id][layer][N] = _XX[N];
@@ -1871,10 +1901,10 @@ long double block_network::NET(int i, long double* SMIN, long double* SMAX, vect
 		int NOUTS = NN[layer];
 		for (int N = 0; N < NOUTS; N++, n_networks++) {
 			if (layer == 2)
-				for (unsigned int k = 0; k < NInputs; k++)
+				for (int k = 0; k < NInputs; k++)
 					NETWORKS[n_networks]->set_rowX(k, X[k][i]);
 			else
-				for (unsigned int k = 0; k < NETWORKS[n_networks]->NInputs; k++)
+				for (int k = 0; k < NETWORKS[n_networks]->NInputs; k++)
 					NETWORKS[n_networks]->set_rowX(k, _XX[k]);
 			_XX[N] = NETWORKS[n_networks]->NET(-1);
 			YN[id][layer][N] = _XX[N];
@@ -1887,7 +1917,7 @@ long double block_network::NET(int i, long double* SMIN, long double* SMAX, vect
 vector<std::string> block_network::simplify(bool to_chain, int NVARIANTS, const std::string& OUT_VAR, const std::string& DECLARATOR, const std::string& POSTFIX, set<std::string>& defined) {
 	vector<std::string> result(1);
 
-	for (unsigned int k = 0; k < NInputs; k++) {
+	for (int k = 0; k < NInputs; k++) {
 		char var[2] = { (char)('a' + k) , 0 };
 		if (defined.find(var) == defined.end()) {
 			defined.insert(var);
@@ -1907,7 +1937,7 @@ vector<std::string> block_network::simplify(bool to_chain, int NVARIANTS, const 
 		int n = layer == 2 ? NInputs : NN[layer - 3];
 		int NOUTS = NN[layer];
 		if (layer != 2) {
-			for (unsigned int k = 0; k < NETWORKS[n_networks]->NInputs; k++) {
+			for (int k = 0; k < NETWORKS[n_networks]->NInputs; k++) {
 				char var[2] = { (char)('a' + k), 0 };
 				if (defined.find(var) == defined.end()) {
 					defined.insert(var);
@@ -1938,7 +1968,7 @@ vector<std::string> block_network::simplify(bool to_chain, int NVARIANTS, const 
 }
 
 block_network::~block_network() {
-	for (int i = 0; i < n_networks; i++)
+	for (unsigned int i = 0; i < n_networks; i++)
 		delete NETWORKS[i];
 }
 
@@ -1954,7 +1984,7 @@ bool block_network::equals(network* from) {
 		if (NCC[i] != from->NCC[i])
 			return false;
 
-	for (int i = 0; i < n_networks; i++)
+	for (unsigned int i = 0; i < n_networks; i++)
 		if (!NETWORKS[i]->equals(_from->NETWORKS[i]))
 			return false;
 

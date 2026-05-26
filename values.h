@@ -52,6 +52,9 @@ class SUM;
 #include <pthread.h>
 #include <dlfcn.h>
 
+unsigned long long getTotalSystemMemory();
+unsigned int getTotalProcs();
+
 typedef void* HMODULE;
 
 HMODULE LoadLibrary(const wchar_t* _fname);
@@ -303,7 +306,7 @@ public:
 	int NN[1024];
 	long double best_err;
 
-	static const int MAXPROBES = 32;
+	int MAXPROBES = 32;
 
 	bool probed = false;
 	int nProbes = 1;

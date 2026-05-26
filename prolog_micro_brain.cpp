@@ -548,20 +548,17 @@ inline void* network::BUILD_FUNC(int NPP, int& NVARIANTS, bool Simplify, vector<
 			if (NVARIANTS > 0) {
 				NVARIANTS--;
 				ITEM* _OUT = dynamic_cast<ITEM*>(_OUTPUTS[0]->clone());
+				string* SCHEME = new string(*_Scheme);
 #ifdef TASKED
-				string* SCHEME = new string("");
 				zVars* _zvars = new zVars();
 				_zvars->insert(zvars.begin(), zvars.end());
 				for (zVars::iterator z_it = _zvars->begin(); z_it != _zvars->end(); z_it++) {
 					z_it->second = z_it->second->clone();
 				}
-				*SCHEME = *_Scheme;
 #pragma omp task if((int)(NPP*TASK_PART) > 1) untied
 				{
 #else
-				string* SCHEME = new string("");
 				zVars* _zvars = &zvars;
-				*SCHEME = *_Scheme;
 #endif
 				int maxPows[256] = { 0 };
 				zVars::iterator _z_last = _zvars->end();
@@ -589,10 +586,10 @@ inline void* network::BUILD_FUNC(int NPP, int& NVARIANTS, bool Simplify, vector<
 					printf("Stage OK ");
 				} while (PRESENT_SQRS(_S, NInputs));
 				printf("\n");
-				string SNET;
-				SNET.reserve(128 * 1024 * 1024);
-				_S->sprint(Vars, maxPows, &SNET, true);
-				SNET += "\n";
+				string * SNET = new string("");
+				SNET->reserve(8 * 1024 * 1024);
+				_S->sprint(Vars, maxPows, SNET, true);
+				*SNET += "\n";
 				unsigned long long used_mask = 0;
 				_S->CHECK_VARS(used_mask, NInputs, Vars, *_zvars);
 				unsigned long long k = ONE64 << NInputs;
@@ -601,7 +598,7 @@ inline void* network::BUILD_FUNC(int NPP, int& NVARIANTS, bool Simplify, vector<
 					if (used_mask & k) {
 						ITEM* z_S = z_it->second;
 						string* zBuf = new string("");
-						zBuf->reserve(32 * 1024 * 1024);
+						zBuf->reserve(8 * 1024 * 1024);
 						z_S->sprint(Vars, maxPows, zBuf, true);
 						if (defined.find(z_it->first) == defined.end()) {
 							defined.insert(z_it->first);
@@ -635,7 +632,7 @@ inline void* network::BUILD_FUNC(int NPP, int& NVARIANTS, bool Simplify, vector<
 						STR += OUT_VAR;
 						STR += " = ";
 					}
-					STR += SNET;
+					STR += *SNET;
 					STR += POSTFIX;
 
 					size_t L = STR.length();
@@ -645,6 +642,7 @@ inline void* network::BUILD_FUNC(int NPP, int& NVARIANTS, bool Simplify, vector<
 					if (BEST.size() > HOW_MANY) BEST.pop_back();
 				}
 				delete Buf;
+				delete SNET;
 #ifdef TASKED
 				_z_last++;
 				for (z_it = _zvars->begin(); z_it != _z_last; z_it++) {
@@ -1734,7 +1732,7 @@ string interpreter::serialize_symbolic(void* expression, vector<string>& Vars) {
 		_strcpy(VARS[i], s.length() + 1, s.c_str());
 		i++;
 	}
-	_OUT.reserve(128 * 1024 * 1024);
+	_OUT.reserve(8 * 1024 * 1024);
 	static_cast<ITEM*>(expression)->sprint(VARS, maxPows, &_OUT, true);
 	while (i)
 		delete[] VARS[--i];
@@ -10636,33 +10634,6 @@ void clause::add_export(string& result, bool introduce_new_parallelism) {
 	else
 		result += ".\n";
 }
-
-#ifndef _MSC_VER
-unsigned long long getTotalSystemMemory()
-{
-	long pages = sysconf(_SC_PHYS_PAGES);
-	long page_size = sysconf(_SC_PAGE_SIZE);
-	return (long long)pages * page_size;
-}
-unsigned int getTotalProcs()
-{
-	return sysconf(_SC_NPROCESSORS_ONLN);
-}
-#else
-unsigned long long getTotalSystemMemory()
-{
-	MEMORYSTATUSEX status = { 0 };
-	status.dwLength = sizeof(status);
-	GlobalMemoryStatusEx(&status);
-	return status.ullTotalPhys;
-}
-unsigned int getTotalProcs()
-{
-	SYSTEM_INFO sysinfo = { 0 };
-	GetSystemInfo(&sysinfo);
-	return sysinfo.dwNumberOfProcessors;
-}
-#endif
 
 int main(int argc, char ** argv) {
 #ifndef _MSC_VER
