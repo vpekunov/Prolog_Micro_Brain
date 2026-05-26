@@ -1048,14 +1048,14 @@ bool network::train(int MAX_EPOCHS) {
 					do {
 						coord_b[id] = rands[id][rc++] % NB;
 						if (!isinf(B[coord_b[id]])) {
-							d_b[id] = 0.05 - 0.1 * rands[id][rc++] / RAND_MAX;
+							d_b[id] = 0.15 - 0.3 * rands[id][rc++] / RAND_MAX;
 							break;
 						}
 					} while (true);
 					do {
 						coord_w[id] = rands[id][rc++] % NW;
 						if (!isinf(W[coord_w[id]])) {
-							d_w[id] = 0.05 - 0.1 * rands[id][rc++] / RAND_MAX;
+							d_w[id] = 0.15 - 0.3 * rands[id][rc++] / RAND_MAX;
 							break;
 						}
 					} while (true);
@@ -1153,7 +1153,7 @@ bool network::train(int MAX_EPOCHS) {
 		double stop = !probed ? omp_get_wtime() : 0.0;
 		if (!probed) {
 			double time = stop - start;
-			if (time < 1.025 * best_time) {
+			if (time < 1.05 * best_time) {
 				best_time = time;
 				best_nProbes = nProbes;
 				best_nCPUs = nCPUs;
@@ -1161,7 +1161,7 @@ bool network::train(int MAX_EPOCHS) {
 #ifdef __APPLE__
 			if (nCPUs == 1) {
 #endif
-				if (best_nProbes < nProbes || nProbes + 1 == MAXPROBES) {
+				if (best_nProbes < nProbes || nProbes == MAXPROBES) {
 					probed = true;
 					nProbes = best_nProbes;
 					nCPUs = best_nCPUs;
@@ -1208,7 +1208,7 @@ bool network::train(int MAX_EPOCHS) {
 	return result;
 }
 
-vector<std::string> network::simplify(bool to_chain, int NVARIANTS, const std::string& OUT_VAR, const std::string& DECLARATOR, const std::string& POSTFIX, set<std::string>& defined) {
+vector<std::string> network::simplify(bool to_chain, int maxN, int NVARIANTS, const std::string& OUT_VAR, set<std::string>& defined) {
 	bool non_compact = false;
 	if (!Y) non_compact = load_data();
 
@@ -1281,7 +1281,7 @@ vector<std::string> network::simplify(bool to_chain, int NVARIANTS, const std::s
 	for (int i = 0; i < NRows; i++)
 		NET(i, SMIN, SMAX, XX, YY);
 
-	vector<std::string> result = ANALYZE(omp_get_num_procs(), NVARIANTS, OUT_VAR, DECLARATOR, POSTFIX, defined, to_chain, SMIN, SMAX, SFREQ, XX, YY);
+	vector<std::string> result = ANALYZE(omp_get_num_procs(), maxN, NVARIANTS, OUT_VAR, &defined, to_chain, SMIN, SMAX, SFREQ, XX, YY);
 
 	delete[] XX;
 	delete[] YY;
@@ -1914,48 +1914,31 @@ long double block_network::NET(int i, long double* SMIN, long double* SMAX, vect
 	return _XX[0];
 }
 
-vector<std::string> block_network::simplify(bool to_chain, int NVARIANTS, const std::string& OUT_VAR, const std::string& DECLARATOR, const std::string& POSTFIX, set<std::string>& defined) {
+vector<std::string> block_network::simplify(bool to_chain, int maxN, int NVARIANTS, const std::string& OUT_VAR, set<std::string>& defined) {
 	vector<std::string> result(1);
-
-	for (int k = 0; k < NInputs; k++) {
-		char var[2] = { (char)('a' + k) , 0 };
-		if (defined.find(var) == defined.end()) {
-			defined.insert(var);
-			if (DECLARATOR.length()) {
-				result[0] += DECLARATOR;
-				result[0] += " ";
-				result[0] += var;
-				result[0] += POSTFIX;
-				result[0] += "\n";
-			}
-		}
-	}
 
 	n_networks = 0;
 	vector<std::string> XX;
 	for (int layer = 2; layer < NL; layer += 3) {
 		int n = layer == 2 ? NInputs : NN[layer - 3];
 		int NOUTS = NN[layer];
-		if (layer != 2) {
-			for (int k = 0; k < NETWORKS[n_networks]->NInputs; k++) {
-				char var[2] = { (char)('a' + k), 0 };
-				if (defined.find(var) == defined.end()) {
-					defined.insert(var);
-					result[0] += DECLARATOR;
-					result[0] += " ";
-				}
+		for (int k = 0; k < NETWORKS[n_networks]->NInputs; k++) {
+			char var[2] = { (char)('a' + k), 0 };
+			if (k >= NInputs && defined.find(var) == defined.end()) {
+				defined.insert(var);
+			}
+			if (layer > 2) {
 				result[0] += var;
 				result[0] += " = ";
 				result[0] += XX[k];
-				result[0] += POSTFIX;
-				result[0] += "\n";
+				result[0] += ";\n";
 			}
 		}
 		XX.clear();
 		for (int N = 0; N < NOUTS; N++, n_networks++) {
 			char buf[80];
 			std::string OUTER = std::string("OUT") + __itoa(n_networks, buf, 10);
-			vector<std::string> addition = NETWORKS[n_networks]->simplify(to_chain, 1, OUTER, DECLARATOR, POSTFIX, defined);
+			vector<std::string> addition = NETWORKS[n_networks]->simplify(to_chain, maxN, 1, OUTER, defined);
 			if (addition.size() == 0)
 				return vector<string>(1, "ERROR!");
 			result[0] += addition[0];
@@ -2045,7 +2028,7 @@ const string nnet::get_content() { return net->get(); }
 
 bool nnet::train(int MAX_EPOCHS) { return net->train(MAX_EPOCHS); }
 
-vector<string> nnet::simplify(bool to_chain, const std::string& DECLARATOR, const std::string& POSTFIX, set<std::string>& defined) { return net->simplify(to_chain, net->HOW_MANY, "", DECLARATOR, POSTFIX, defined); }
+vector<string> nnet::simplify(bool to_chain, int maxN, set<std::string>& defined) { return net->simplify(to_chain, maxN, net->HOW_MANY, "", defined); }
 
 long double nnet::sim() { return net->sim(); }
 

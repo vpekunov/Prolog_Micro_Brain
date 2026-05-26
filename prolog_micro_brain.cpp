@@ -450,7 +450,7 @@ string unescape(const string & s) {
 	return result;
 }
 
-inline void* network::BUILD_FUNC(int NPP, int& NVARIANTS, bool Simplify, vector<string>* BEST, const string& OUT_VAR, const string& DECLARATOR, const std::string& POSTFIX, set<std::string>& defined, char** Vars, vector<vector<VARIANT>*> _VARS, int layer, zVars& zvars, string* Scheme, SUM** Inputs) {
+inline void* network::BUILD_FUNC(int NPP, int& NVARIANTS, bool Simplify, vector<string>* BEST, const string& OUT_VAR, set<std::string> * defined, char** Vars, vector<vector<VARIANT>*> _VARS, int layer, zVars * zvars, string* Scheme, SUM** Inputs) {
 
 	int n_input[64] = { 0 };
 	int n_output[64] = { 0 };
@@ -504,9 +504,9 @@ inline void* network::BUILD_FUNC(int NPP, int& NVARIANTS, bool Simplify, vector<
 		if (layer == 1) {
 			*_Scheme = "|";
 			zVars::iterator it;
-			for (it = zvars.begin(); it != zvars.end(); it++)
+			for (it = zvars->begin(); it != zvars->end(); it++)
 				delete it->second;
-			zvars.clear();
+			zvars->clear();
 		}
 		else
 			*_Scheme = *Scheme;
@@ -521,7 +521,7 @@ inline void* network::BUILD_FUNC(int NPP, int& NVARIANTS, bool Simplify, vector<
 			sqrt_name[1] = neuro_num >= 10 ? '0' + neuro_num / 10 : '0';
 			sqrt_name[2] = '0' + neuro_num % 10;
 			string zvar(sqrt_name);
-			zvars[zvar] = ARG->clone();
+			(*zvars)[zvar] = ARG->clone();
 			_OUTPUTS[j] = new SUM(0.0);
 			*_Scheme += kinds[VAR.kind];
 			*_Scheme += "|";
@@ -542,7 +542,7 @@ inline void* network::BUILD_FUNC(int NPP, int& NVARIANTS, bool Simplify, vector<
 		}
 
 		if (layer < NL) {
-			BUILD_FUNC(NPP, NVARIANTS, Simplify, BEST, OUT_VAR, DECLARATOR, POSTFIX, defined, Vars, _VARS, layer + 1, zvars, _Scheme, _OUTPUTS);
+			BUILD_FUNC(NPP, NVARIANTS, Simplify, BEST, OUT_VAR, defined, Vars, _VARS, layer + 1, zvars, _Scheme, _OUTPUTS);
 		}
 		else {
 			if (NVARIANTS > 0) {
@@ -551,14 +551,14 @@ inline void* network::BUILD_FUNC(int NPP, int& NVARIANTS, bool Simplify, vector<
 				string* SCHEME = new string(*_Scheme);
 #ifdef TASKED
 				zVars* _zvars = new zVars();
-				_zvars->insert(zvars.begin(), zvars.end());
+				_zvars->insert(zvars->begin(), zvars->end());
 				for (zVars::iterator z_it = _zvars->begin(); z_it != _zvars->end(); z_it++) {
 					z_it->second = z_it->second->clone();
 				}
 #pragma omp task if((int)(NPP*TASK_PART) > 1) untied
 				{
 #else
-				zVars* _zvars = &zvars;
+				zVars* _zvars = zvars;
 #endif
 				int maxPows[256] = { 0 };
 				zVars::iterator _z_last = _zvars->end();
@@ -593,30 +593,26 @@ inline void* network::BUILD_FUNC(int NPP, int& NVARIANTS, bool Simplify, vector<
 				unsigned long long used_mask = 0;
 				_S->CHECK_VARS(used_mask, NInputs, Vars, *_zvars);
 				unsigned long long k = ONE64 << NInputs;
-				// The last layer is LINEAR. z[last] is not considered (= OUT)
-				for (z_it = _zvars->begin(); z_it != _z_last; z_it++, k <<= 1)
-					if (used_mask & k) {
-						ITEM* z_S = z_it->second;
-						string* zBuf = new string("");
-						zBuf->reserve(8 * 1024 * 1024);
-						z_S->sprint(Vars, maxPows, zBuf, true);
-						if (defined.find(z_it->first) == defined.end()) {
-							defined.insert(z_it->first);
-							*Buf += DECLARATOR;
-							*Buf += " ";
-						}
-						*Buf += z_it->first.c_str();
-						*Buf += " = nsqrt(";
-						*Buf += *zBuf;
-						*Buf += ")";
-						*Buf += POSTFIX;
-						*Buf += "\n";
-						delete zBuf;
-					}
-				delete _S;
 				// printf("%s NET<%s> : %s\n", Buf->c_str(), SCHEME->c_str(), SNET.c_str());
 #pragma omp critical
 				{
+					// The last layer is LINEAR. z[last] is not considered (= OUT)
+					for (z_it = _zvars->begin(); z_it != _z_last; z_it++, k <<= 1)
+						if (used_mask & k) {
+							ITEM* z_S = z_it->second;
+							string* zBuf = new string("");
+							zBuf->reserve(8 * 1024 * 1024);
+							z_S->sprint(Vars, maxPows, zBuf, true);
+							if (defined->find(z_it->first) == defined->end()) {
+								defined->insert(z_it->first);
+							}
+							*Buf += z_it->first.c_str();
+							*Buf += " = nsqrt(&err,";
+							*Buf += *zBuf;
+							*Buf += ");";
+							*Buf += "\n";
+							delete zBuf;
+						}
 					string STR = *Buf;
 					if (OUT_VAR.length() == 0) {
 						STR += "NET<";
@@ -624,16 +620,14 @@ inline void* network::BUILD_FUNC(int NPP, int& NVARIANTS, bool Simplify, vector<
 						STR += "> : ";
 					}
 					else {
-						if (defined.find(OUT_VAR) == defined.end()) {
-							defined.insert(OUT_VAR);
-							STR += DECLARATOR;
-							STR += " ";
+						if (defined->find(OUT_VAR) == defined->end()) {
+							defined->insert(OUT_VAR);
 						}
 						STR += OUT_VAR;
 						STR += " = ";
 					}
 					STR += *SNET;
-					STR += POSTFIX;
+					STR += ";";
 
 					size_t L = STR.length();
 					vector<string>::iterator after = BEST->begin();
@@ -641,6 +635,7 @@ inline void* network::BUILD_FUNC(int NPP, int& NVARIANTS, bool Simplify, vector<
 					BEST->insert(after, STR);
 					if (BEST->size() > HOW_MANY) BEST->pop_back();
 				}
+				delete _S;
 				delete Buf;
 				delete SNET;
 #ifdef TASKED
@@ -677,15 +672,15 @@ delete _Scheme;
 
 if (layer == 1) {
 	zVars::iterator it;
-	for (it = zvars.begin(); it != zvars.end(); it++)
+	for (it = zvars->begin(); it != zvars->end(); it++)
 		delete it->second;
-	zvars.clear();
+	zvars->clear();
 }
 
 return NULL;
 }
 
-vector<string> network::ANALYZE(int NPP, int& NVARIANTS, const std::string& OUT_VAR, const std::string& DECLARATOR, const std::string& POSTFIX, set<std::string>& defined, bool Simplify, long double* SMIN, long double* SMAX, int* SFREQ, vector<long double> XX[], vector<long double> YY[]) {
+vector<string> network::ANALYZE(int NPP, int maxN, int& NVARIANTS, const std::string& OUT_VAR, set<std::string> * defined, bool Simplify, long double* SMIN, long double* SMAX, int* SFREQ, vector<long double> XX[], vector<long double> YY[]) {
 
 	double start_time = omp_get_wtime();
 
@@ -810,7 +805,7 @@ vector<string> network::ANALYZE(int NPP, int& NVARIANTS, const std::string& OUT_
 	{
 #pragma omp single
 		{
-			BUILD_FUNC(NPP, NVARIANTS, Simplify, &BEST, OUT_VAR, DECLARATOR, POSTFIX, defined, Vars, _VARS, 1, zvars);
+			BUILD_FUNC(NPP, NVARIANTS, Simplify, &BEST, OUT_VAR, defined, Vars, _VARS, 1, &zvars);
 #ifdef TASKED
 			if ((int)(NPP * TASK_PART) > 1) {
 #pragma omp taskwait
@@ -6687,7 +6682,7 @@ public:
 
 	virtual generated_vars* generate_variants(context* CTX, frame_item* f, vector<value*>*& positional_vals) {
 		if (positional_vals->size() != 2 && positional_vals->size() != 3 && positional_vals->size() != 4) {
-			std::cout << "nsimplify(IN,OUT[,Style]) or nsimplify(IN,to_chain,OUT[,Style]): incorrect number of arguments!" << endl;
+			std::cout << "nsimplify(IN,OUT[,maxN]) or nsimplify(IN,to_chain,OUT[,maxN]): incorrect number of arguments!" << endl;
 			exit(-3);
 		}
 		generated_vars* result = new generated_vars();
@@ -6697,95 +6692,87 @@ public:
 
 		bool d1 = positional_vals->at(0)->defined();
 		if (!d1) {
-			std::cout << "nsimplify(IN,OUT[,Style]) or nsimplify(IN,to_chain,OUT[,Style]) indeterminated!" << endl;
+			std::cout << "nsimplify(IN,OUT[,maxN]) or nsimplify(IN,to_chain,OUT[,maxN]) indeterminated!" << endl;
 			exit(-3);
 		}
 		nnet* in = dynamic_cast<nnet*>(positional_vals->at(0));
 		if (!in) {
-			std::cout << "nsimplify(IN,OUT[,Style]) or nsimplify(IN,to_chain,OUT[,Style]) : IN is not a neural net!" << endl;
+			std::cout << "nsimplify(IN,OUT[,maxN]) or nsimplify(IN,to_chain,OUT[,maxN]) : IN is not a neural net!" << endl;
 			exit(-3);
 		}
 		term* t2 = dynamic_cast<term*>(positional_vals->at(1));
 		bool to_chain = positional_vals->size() >= 3 && positional_vals->at(1)->defined() && t2 && t2->get_name() == "to_chain";
 		size_t n3 = positional_vals->size() - 1;
-		term* STYLE = dynamic_cast<term*>(positional_vals->at(n3));
-		if (STYLE) n3--;
+		int_number* nn = dynamic_cast<int_number*>(positional_vals->at(n3));
+		int maxN = 4;
+		if (nn) {
+			maxN = (int)(0.5 + nn->get_value());
+			n3--;
+		}
 		vector<string> Vars;
 		vector<string> BEST;
 		size_t p = 0;
 		ITEM* r = static_cast<SUM*>(prolog->deserialize_symbolic(in->get_name(), p, Vars));
 		if (r) {
 			set<std::string> defined;
-			if (STYLE) {
-				string style = STYLE->get_name();
-				if (style == "c" || style == "c++") {
-					BEST = in->simplify(to_chain, "double", ";", defined);
-					BEST[0] = string(
-						"inline auto nsqrt(double x) {\n"
-						"   return x < 0.0 ? sqrt(-x) : sqrt(x);\n"
-						"}\n"
-						"inline constexpr auto npow(double a, int p) {\n"
-						"	if (p == 0)\n"
-						"		return 1.0;\n"
-						"	else if (p == 1)\n"
-						"		return a;\n"
-						"	else if (p == 2)\n"
-						"		return a * a;\n"
-						"	else if (p == 3)\n"
-						"		return a * a * a;\n"
-						"	else if (p == 4)\n"
-						"		return a * a * a * a;\n"
-						"	else if (p == 5)\n"
-						"		return a * a * a * a * a;\n"
-						"	else if (p == 6)\n"
-						"		return a * a * a * a * a * a;\n"
-						"	else if (p == 7)\n"
-						"		return a * a * a * a * a * a * a;\n"
-						"	else if (p == 8)\n"
-						"		return a * a * a * a * a * a * a * a;\n"
-						"	else if (p == 9)\n"
-						"		return a * a * a * a * a * a * a * a * a;\n"
-						"	else if (p == 10)\n"
-						"		return a * a * a * a * a * a * a * a * a * a;\n"
-						"	else if (p == 11)\n"
-						"		return a * a * a * a * a * a * a * a * a * a * a;\n"
-						"	else if (p == 12)\n"
-						"		return a * a * a * a * a * a * a * a * a * a * a * a;\n"
-						"	else if (p == 13)\n"
-						"		return a * a * a * a * a * a * a * a * a * a * a * a * a;\n"
-						"	else if (p == 14)\n"
-						"		return a * a * a * a * a * a * a * a * a * a * a * a * a * a;\n"
-						"	else if (p == 15)\n"
-						"		return a * a * a * a * a * a * a * a * a * a * a * a * a * a * a;\n"
-						"	else if (p == 16)\n"
-						"		return a * a * a * a * a * a * a * a * a * a * a * a * a * a * a * a;\n"
-						"	else if (p == 17)\n"
-						"		return a * a * a * a * a * a * a * a * a * a * a * a * a * a * a * a * a;\n"
-						"	else if (p == 18)\n"
-						"		return a * a * a * a * a * a * a * a * a * a * a * a * a * a * a * a * a * a;\n"
-						"	else if (p == 19)\n"
-						"		return a * a * a * a * a * a * a * a * a * a * a * a * a * a * a * a * a * a * a;\n"
-						"	else if (p == 20)\n"
-						"		return a * a * a * a * a * a * a * a * a * a * a * a * a * a * a * a * a * a * a * a;\n"
-						"	else\n"
-						"		return ::pow(a, p);\n"
-						"}\n") + BEST[0];
-				}
-				else {
-					BEST = in->simplify(to_chain, "", "", defined);
-					BEST[0] = string(
-						"def nsqrt(x):\n"
-						"   return sqrt(-x) if x < 0.0 else sqrt(x)\n"
-						"\n") + BEST[0];
-				}
+			BEST = in->simplify(to_chain, maxN, defined);
+			string preface =
+				"inline auto nsqrt(int * err, double x) {\n"
+				"   if (x < 0.0) { *err = 1; return sqrt(-x); } else return sqrt(x);\n"
+				"}\n"
+				"inline constexpr auto npow(double a, int p) {\n"
+				"	if (p == 0)\n"
+				"		return 1.0;\n"
+				"	else if (p == 1)\n"
+				"		return a;\n"
+				"	else if (p == 2)\n"
+				"		return a * a;\n"
+				"	else if (p == 3)\n"
+				"		return a * a * a;\n"
+				"	else if (p == 4)\n"
+				"		return a * a * a * a;\n"
+				"	else if (p == 5)\n"
+				"		return a * a * a * a * a;\n"
+				"	else if (p == 6)\n"
+				"		return a * a * a * a * a * a;\n"
+				"	else if (p == 7)\n"
+				"		return a * a * a * a * a * a * a;\n"
+				"	else if (p == 8)\n"
+				"		return a * a * a * a * a * a * a * a;\n"
+				"	else if (p == 9)\n"
+				"		return a * a * a * a * a * a * a * a * a;\n"
+				"	else if (p == 10)\n"
+				"		return a * a * a * a * a * a * a * a * a * a;\n"
+				"	else if (p == 11)\n"
+				"		return a * a * a * a * a * a * a * a * a * a * a;\n"
+				"	else if (p == 12)\n"
+				"		return a * a * a * a * a * a * a * a * a * a * a * a;\n"
+				"	else if (p == 13)\n"
+				"		return a * a * a * a * a * a * a * a * a * a * a * a * a;\n"
+				"	else if (p == 14)\n"
+				"		return a * a * a * a * a * a * a * a * a * a * a * a * a * a;\n"
+				"	else if (p == 15)\n"
+				"		return a * a * a * a * a * a * a * a * a * a * a * a * a * a * a;\n"
+				"	else if (p == 16)\n"
+				"		return a * a * a * a * a * a * a * a * a * a * a * a * a * a * a * a;\n"
+				"	else if (p == 17)\n"
+				"		return a * a * a * a * a * a * a * a * a * a * a * a * a * a * a * a * a;\n"
+				"	else if (p == 18)\n"
+				"		return a * a * a * a * a * a * a * a * a * a * a * a * a * a * a * a * a * a;\n"
+				"	else if (p == 19)\n"
+				"		return a * a * a * a * a * a * a * a * a * a * a * a * a * a * a * a * a * a * a;\n"
+				"	else if (p == 20)\n"
+				"		return a * a * a * a * a * a * a * a * a * a * a * a * a * a * a * a * a * a * a * a;\n"
+				"	else\n"
+				"		return ::pow(a, p);\n"
+				"}\n"
+				"int err = 0;\n";
+			for (const string& var : defined) {
+				preface += "double ";
+				preface += var;
+				preface += ";\n";
 			}
-			else {
-				BEST = in->simplify(to_chain, "", "", defined);
-				BEST[0] = string(
-					"def nsqrt(x):\n"
-					"   return sqrt(-x) if x < 0.0 else sqrt(x)\n"
-					"\n") + BEST[0];
-			}
+			BEST[0] = preface + BEST[0];
 		}
 		stack_container<value*> OUT_LIST;
 		for (string V : BEST)

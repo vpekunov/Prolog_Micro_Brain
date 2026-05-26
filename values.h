@@ -361,8 +361,6 @@ public:
 
 	const int _div = 20;
 
-	const int maxN = 4;
-
 	const static int n_kinds = 5;
 
 	typedef enum { vkPoly = 0, vkPolySqr = 1, vkPolyRev = 2, vkPolySqrRev = 3, vkLinear = 4 } variant_kinds;
@@ -399,7 +397,7 @@ public:
 
 	virtual bool train(int MAX_EPOCHS);
 
-	virtual vector<std::string> simplify(bool to_chain, int NVARIANTS, const std::string& OUT_VAR, const std::string& DECLARATOR, const std::string& POSTFIX, set<std::string>& defined);
+	virtual vector<std::string> simplify(bool to_chain, int maxN, int NVARIANTS, const std::string& OUT_VAR, set<std::string>& defined);
 
 	virtual ~network();
 
@@ -425,12 +423,12 @@ public:
 
 	void* BUILD_FUNC(int NPP, int& NVARIANTS, bool Simplify,
 		vector<string> * BEST,
-		const string& OUT_VAR, const string& DECLARATOR, const std::string& POSTFIX, set<std::string>& defined,
+		const string& OUT_VAR, set<std::string> * defined,
 		char** Vars,
 		vector<vector<VARIANT>*>_VARS,
-		int layer, zVars& zvars, string* Scheme = NULL, SUM** Inputs = NULL);
+		int layer, zVars * zvars, string* Scheme = NULL, SUM** Inputs = NULL);
 
-	vector<string> ANALYZE(int NPP, int& NVARIANTS, const std::string& OUT_VAR, const std::string& DECLARATOR, const std::string& POSTFIX, set<std::string>& defined, bool Simplify,
+	vector<string> ANALYZE(int NPP, int maxN, int& NVARIANTS, const std::string& OUT_VAR, set<std::string> * defined, bool Simplify,
 		long double* SMIN, long double* SMAX, int* SFREQ,
 		vector<long double> XX[], vector<long double> YY[]);
 };
@@ -452,7 +450,7 @@ public:
 	virtual long double NET(int i, long double* SMIN = NULL, long double* SMAX = NULL,
 		vector<long double>* XX = NULL, vector<long double>* YY = NULL);;
 
-	virtual vector<std::string> simplify(bool to_chain, int NVARIANTS, const std::string& OUT_VAR, const std::string& DECLARATOR, const std::string& POSTFIX, set<std::string>& defined);
+	virtual vector<std::string> simplify(bool to_chain, int maxN, int NVARIANTS, const std::string& OUT_VAR, set<std::string>& defined);
 
 	virtual ~block_network();
 
@@ -484,7 +482,7 @@ public:
 
 	virtual bool train(int MAX_EPOCHS);
 
-	virtual vector<string> simplify(bool to_chain, const std::string& DECLARATOR, const std::string& POSTFIX, set<std::string>& defined);
+	virtual vector<string> simplify(bool to_chain, int maxN, set<std::string>& defined);
 
 	virtual long double sim();
 	virtual unsigned int nX();
