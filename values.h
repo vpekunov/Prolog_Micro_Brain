@@ -424,7 +424,7 @@ public:
 	typedef map<string, ITEM*> zVars;
 
 	void* BUILD_FUNC(int NPP, int& NVARIANTS, bool Simplify,
-		vector<string>& BEST,
+		vector<string> * BEST,
 		const string& OUT_VAR, const string& DECLARATOR, const std::string& POSTFIX, set<std::string>& defined,
 		char** Vars,
 		vector<vector<VARIANT>*>_VARS,

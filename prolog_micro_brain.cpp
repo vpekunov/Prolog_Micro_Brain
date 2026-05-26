@@ -450,7 +450,7 @@ string unescape(const string & s) {
 	return result;
 }
 
-inline void* network::BUILD_FUNC(int NPP, int& NVARIANTS, bool Simplify, vector<string>& BEST, const string& OUT_VAR, const string& DECLARATOR, const std::string& POSTFIX, set<std::string>& defined, char** Vars, vector<vector<VARIANT>*> _VARS, int layer, zVars& zvars, string* Scheme, SUM** Inputs) {
+inline void* network::BUILD_FUNC(int NPP, int& NVARIANTS, bool Simplify, vector<string>* BEST, const string& OUT_VAR, const string& DECLARATOR, const std::string& POSTFIX, set<std::string>& defined, char** Vars, vector<vector<VARIANT>*> _VARS, int layer, zVars& zvars, string* Scheme, SUM** Inputs) {
 
 	int n_input[64] = { 0 };
 	int n_output[64] = { 0 };
@@ -586,7 +586,7 @@ inline void* network::BUILD_FUNC(int NPP, int& NVARIANTS, bool Simplify, vector<
 					printf("Stage OK ");
 				} while (PRESENT_SQRS(_S, NInputs));
 				printf("\n");
-				string * SNET = new string("");
+				string* SNET = new string("");
 				SNET->reserve(8 * 1024 * 1024);
 				_S->sprint(Vars, maxPows, SNET, true);
 				*SNET += "\n";
@@ -636,10 +636,10 @@ inline void* network::BUILD_FUNC(int NPP, int& NVARIANTS, bool Simplify, vector<
 					STR += POSTFIX;
 
 					size_t L = STR.length();
-					vector<string>::iterator after = BEST.begin();
-					while (after != BEST.end() && after->length() < L) after++;
-					BEST.insert(after, STR);
-					if (BEST.size() > HOW_MANY) BEST.pop_back();
+					vector<string>::iterator after = BEST->begin();
+					while (after != BEST->end() && after->length() < L) after++;
+					BEST->insert(after, STR);
+					if (BEST->size() > HOW_MANY) BEST->pop_back();
 				}
 				delete Buf;
 				delete SNET;
@@ -810,7 +810,7 @@ vector<string> network::ANALYZE(int NPP, int& NVARIANTS, const std::string& OUT_
 	{
 #pragma omp single
 		{
-			BUILD_FUNC(NPP, NVARIANTS, Simplify, BEST, OUT_VAR, DECLARATOR, POSTFIX, defined, Vars, _VARS, 1, zvars);
+			BUILD_FUNC(NPP, NVARIANTS, Simplify, &BEST, OUT_VAR, DECLARATOR, POSTFIX, defined, Vars, _VARS, 1, zvars);
 #ifdef TASKED
 			if ((int)(NPP * TASK_PART) > 1) {
 #pragma omp taskwait
