@@ -325,11 +325,11 @@ public:
 	long double mmin[512];
 	long double mmax[512];
 
-	long double NUMIN, numin;
-	long double NUMAX, numax;
+	long double NUMIN[512], numin[512];
+	long double NUMAX[512], numax[512];
 
 	long double d[512];
-	long double nud;
+	long double nud[512];
 
 	int NW = 0;
 	int NB = 0;
@@ -340,11 +340,9 @@ public:
 	long double tempX[512];
 
 	long double* X[512] = { NULL };
-	long double* Y = NULL;
-	long double* YS = NULL;
-	long double* ERR = NULL;
-
-	double mlx_time = 0.0;
+	long double* Y[512] = { NULL };
+	long double* YS[512] = { NULL };
+	long double* ERR[512] = { NULL };
 
 	int coord_b[1024];
 	double d_b[1024];
@@ -371,7 +369,7 @@ public:
 
 	network(const std::string& FName, const std::string& content);
 
-	network(network* templ, int ni, int n1, int n2, bool first, bool last);
+	network(network* templ, int ni, int n1, int n2, bool first, bool last, int out);
 
 	virtual const std::string& fname();
 
@@ -381,7 +379,52 @@ public:
 
 	virtual unsigned int nX();
 
-	virtual long double sim();
+	virtual unsigned int nY();
+
+	virtual long double getY(int i);
+
+	virtual void sim(long double * result);
+
+	virtual void filter_simplification(vector<string>& result) {
+		map< int, set<int> > branches;
+		for (int pq = 0; pq < result.size(); pq++) {
+			string cur = result[pq];
+			int cur_signature = 0;
+			unsigned int ptr;
+			for (ptr = 0; ptr < cur.length() && isdigit(cur[ptr]); ptr++)
+				cur_signature = 10 * cur_signature + (cur[ptr] - '0');
+			if (branches.find(cur_signature) == branches.end())
+				branches[cur_signature] = set<int>();
+			branches[cur_signature].insert(pq);
+			result[pq] = cur.substr(ptr + 1);
+		}
+		for (const auto& [signature, nums] : branches) {
+			set<int>::iterator it = nums.begin();
+			string first = result[*it];
+			it++;
+			while (it != nums.end()) {
+				string cur = result[*it];
+				size_t LL = min(cur.length(), first.length());
+				size_t ps = 0;
+				for (; ps < LL; ps++)
+					if (first[ps] != cur[ps]) {
+						while (ps >= 0 && cur[ps] >= ' ')
+							ps--;
+						break;
+					}
+				result[*nums.begin()] += "\n";
+				result[*nums.begin()] += cur.substr(ps + 1);
+				result[*it] = "";
+				it++;
+			}
+		}
+		unsigned int c = 0;
+		while (c < result.size())
+			if (result.at(c).length() == 0)
+				result.erase(result.begin() + c);
+			else
+				c++;
+	}
 
 	virtual bool load_data();
 
@@ -389,15 +432,15 @@ public:
 
 	inline long double S(long double s);;
 
-	virtual long double PERTURBED_NET(int i, long double* SMIN = NULL, long double* SMAX = NULL,
+	virtual void PERTURBED_NET(int i, long double* SMIN = NULL, long double* SMAX = NULL,
 		vector<long double>* XX = NULL, vector<long double>* YY = NULL);
 
-	virtual long double NET(int i, long double* SMIN = NULL, long double* SMAX = NULL,
+	virtual void NET(int i, long double* SMIN = NULL, long double* SMAX = NULL,
 		vector<long double>* XX = NULL, vector<long double>* YY = NULL);;
 
 	virtual bool train(int MAX_EPOCHS);
 
-	virtual vector<std::string> simplify(bool to_chain, int maxN, int NVARIANTS, const std::string& OUT_VAR, set<std::string>& defined);
+	virtual vector<std::string> simplify(bool to_chain, int maxN, int NVARIANTS, const vector<std::string> * OUT_VAR, set<std::string>& defined);
 
 	virtual ~network();
 
@@ -405,7 +448,7 @@ public:
 
 	virtual const string get();
 
-	static std::string create(::_list& nlayers, const std::string& dat_file, ::_list& inps, int out);
+	static std::string create(::_list& nlayers, const std::string& dat_file, ::_list& inps, const vector<int> & out);
 
 	/* LU - разложение  с выбором максимального элемента по диагонали */
 	bool _GetLU(int NN, int* iRow, long double* A, long double* LU);
@@ -423,12 +466,12 @@ public:
 
 	void* BUILD_FUNC(int NPP, int& NVARIANTS, bool Simplify,
 		vector<string> * BEST,
-		const string& OUT_VAR, set<std::string> * defined,
+		const vector<string> * OUT_VAR, set<std::string> * defined,
 		char** Vars,
 		vector<vector<VARIANT>*>_VARS,
 		int layer, zVars * zvars, string* Scheme = NULL, SUM** Inputs = NULL);
 
-	vector<string> ANALYZE(int NPP, int maxN, int& NVARIANTS, const std::string& OUT_VAR, set<std::string> * defined, bool Simplify,
+	vector<string> ANALYZE(int NPP, int maxN, int& NVARIANTS, const vector<std::string> * OUT_VAR, set<std::string> * defined, bool Simplify,
 		long double* SMIN, long double* SMAX, int* SFREQ,
 		vector<long double> XX[], vector<long double> YY[]);
 };
@@ -444,13 +487,13 @@ public:
 
 	virtual bool train(int MAX_EPOCHS);
 
-	virtual long double PERTURBED_NET(int i, long double* SMIN = NULL, long double* SMAX = NULL,
+	virtual void PERTURBED_NET(int i, long double* SMIN = NULL, long double* SMAX = NULL,
 		vector<long double>* XX = NULL, vector<long double>* YY = NULL);;
 
-	virtual long double NET(int i, long double* SMIN = NULL, long double* SMAX = NULL,
+	virtual void NET(int i, long double* SMIN = NULL, long double* SMAX = NULL,
 		vector<long double>* XX = NULL, vector<long double>* YY = NULL);;
 
-	virtual vector<std::string> simplify(bool to_chain, int maxN, int NVARIANTS, const std::string& OUT_VAR, set<std::string>& defined);
+	virtual vector<std::string> simplify(bool to_chain, int maxN, int NVARIANTS, const vector<std::string> * OUT_VAR, set<std::string>& defined);
 
 	virtual ~block_network();
 
@@ -484,8 +527,10 @@ public:
 
 	virtual vector<string> simplify(bool to_chain, int maxN, set<std::string>& defined);
 
-	virtual long double sim();
+	virtual void sim(long double * result);
 	virtual unsigned int nX();
+	virtual unsigned int nY();
+	virtual long double getY(int i);
 	virtual void setX(unsigned int i, long double v);
 
 	virtual value* copy(context* CTX, frame_item* f, int unwind = 0);

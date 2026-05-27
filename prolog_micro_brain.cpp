@@ -450,7 +450,7 @@ string unescape(const string & s) {
 	return result;
 }
 
-inline void* network::BUILD_FUNC(int NPP, int& NVARIANTS, bool Simplify, vector<string>* BEST, const string& OUT_VAR, set<std::string> * defined, char** Vars, vector<vector<VARIANT>*> _VARS, int layer, zVars * zvars, string* Scheme, SUM** Inputs) {
+inline void* network::BUILD_FUNC(int NPP, int& NVARIANTS, bool Simplify, vector<string>* BEST, const vector<string> * OUT_VAR, set<std::string> * defined, char** Vars, vector<vector<VARIANT>*> _VARS, int layer, zVars * zvars, string* Scheme, SUM** Inputs) {
 
 	int n_input[64] = { 0 };
 	int n_output[64] = { 0 };
@@ -547,106 +547,110 @@ inline void* network::BUILD_FUNC(int NPP, int& NVARIANTS, bool Simplify, vector<
 		else {
 			if (NVARIANTS > 0) {
 				NVARIANTS--;
-				ITEM* _OUT = dynamic_cast<ITEM*>(_OUTPUTS[0]->clone());
-				string* SCHEME = new string(*_Scheme);
+				int signature = rand();
+				for (int nout = 0; nout < NN[NL - 1]; nout++) {
 #ifdef TASKED
-				zVars* _zvars = new zVars();
-				_zvars->insert(zvars->begin(), zvars->end());
-				for (zVars::iterator z_it = _zvars->begin(); z_it != _zvars->end(); z_it++) {
-					z_it->second = z_it->second->clone();
-				}
-#pragma omp task if((int)(NPP*TASK_PART) > 1) untied
-				{
+					zVars* _zvars = new zVars();
+					_zvars->insert(zvars->begin(), zvars->end());
+					for (zVars::iterator z_it = _zvars->begin(); z_it != _zvars->end(); z_it++) {
+						z_it->second = z_it->second->clone();
+					}
 #else
-				zVars* _zvars = zvars;
+					zVars* _zvars = zvars;
 #endif
-				int maxPows[256] = { 0 };
-				zVars::iterator _z_last = _zvars->end();
-				zVars::iterator z_it;
-				// The last layer is LINEAR. z[last] is not considered (= OUT)
-				_z_last--;
-				for (z_it = _zvars->begin(); z_it != _z_last; z_it++) {
-					do {
-						ITEM* z__S = SUBSTITUTE_SQRS(z_it->second, NInputs, Vars, *_zvars);
-						if (Simplify)
-							z_it->second = SIMPLIFY(z__S);
-						else
-							z_it->second = z__S;
-					} while (PRESENT_SQRS(z_it->second, NInputs));
-				}
-				printf("SIMPLIFIED\n");
-				string* Buf = new string("");
-				ITEM* _S = _OUT;
-				do {
-					ITEM* __S = SUBSTITUTE_SQRS(_S, NInputs, Vars, *_zvars);
-					if (Simplify)
-						_S = SIMPLIFY(__S);
-					else
-						_S = __S;
-					printf("Stage OK ");
-				} while (PRESENT_SQRS(_S, NInputs));
-				printf("\n");
-				string* SNET = new string("");
-				SNET->reserve(8 * 1024 * 1024);
-				_S->sprint(Vars, maxPows, SNET, true);
-				*SNET += "\n";
-				unsigned long long used_mask = 0;
-				_S->CHECK_VARS(used_mask, NInputs, Vars, *_zvars);
-				unsigned long long k = ONE64 << NInputs;
-				// printf("%s NET<%s> : %s\n", Buf->c_str(), SCHEME->c_str(), SNET.c_str());
-#pragma omp critical
-				{
-					// The last layer is LINEAR. z[last] is not considered (= OUT)
-					for (z_it = _zvars->begin(); z_it != _z_last; z_it++, k <<= 1)
-						if (used_mask & k) {
-							ITEM* z_S = z_it->second;
-							string* zBuf = new string("");
-							zBuf->reserve(8 * 1024 * 1024);
-							z_S->sprint(Vars, maxPows, zBuf, true);
-							if (defined->find(z_it->first) == defined->end()) {
-								defined->insert(z_it->first);
-							}
-							*Buf += z_it->first.c_str();
-							*Buf += " = nsqrt(&err,";
-							*Buf += *zBuf;
-							*Buf += ");";
-							*Buf += "\n";
-							delete zBuf;
-						}
-					string STR = *Buf;
-					if (OUT_VAR.length() == 0) {
-						STR += "NET<";
-						STR += *SCHEME;
-						STR += "> : ";
-					}
-					else {
-						if (defined->find(OUT_VAR) == defined->end()) {
-							defined->insert(OUT_VAR);
-						}
-						STR += OUT_VAR;
-						STR += " = ";
-					}
-					STR += *SNET;
-					STR += ";";
-
-					size_t L = STR.length();
-					vector<string>::iterator after = BEST->begin();
-					while (after != BEST->end() && after->length() < L) after++;
-					BEST->insert(after, STR);
-					if (BEST->size() > HOW_MANY) BEST->pop_back();
-				}
-				delete _S;
-				delete Buf;
-				delete SNET;
+					string* SCHEME = new string(*_Scheme);
+					ITEM* _OUT = dynamic_cast<ITEM*>(_OUTPUTS[nout]->clone());
 #ifdef TASKED
-				_z_last++;
-				for (z_it = _zvars->begin(); z_it != _z_last; z_it++) {
-					delete z_it->second;
-				}
-				delete _zvars;
-				delete SCHEME;
-				}
+#pragma omp task if((int)(NPP*TASK_PART) > 1) untied
+					{
 #endif
+						int maxPows[256] = { 0 };
+						zVars::iterator _z_last = _zvars->end();
+						zVars::iterator z_it;
+						// The last layer is LINEAR. z[last] is not considered (= OUT)
+						_z_last--;
+						for (z_it = _zvars->begin(); z_it != _z_last; z_it++) {
+							do {
+								ITEM* z__S = SUBSTITUTE_SQRS(z_it->second, NInputs, Vars, *_zvars);
+								if (Simplify)
+									z_it->second = SIMPLIFY(z__S);
+								else
+									z_it->second = z__S;
+							} while (PRESENT_SQRS(z_it->second, NInputs));
+						}
+						string* Buf = new string("");
+						ITEM* _S = _OUT;
+						do {
+							ITEM* __S = SUBSTITUTE_SQRS(_S, NInputs, Vars, *_zvars);
+							if (Simplify)
+								_S = SIMPLIFY(__S);
+							else
+								_S = __S;
+						} while (PRESENT_SQRS(_S, NInputs));
+						string* SNET = new string("");
+						SNET->reserve(8 * 1024 * 1024);
+						_S->sprint(Vars, maxPows, SNET, true);
+						*SNET += "\n";
+						unsigned long long used_mask = 0;
+						_S->CHECK_VARS(used_mask, NInputs, Vars, *_zvars);
+						unsigned long long k = ONE64 << NInputs;
+						// printf("%s NET<%s> : %s\n", Buf->c_str(), SCHEME->c_str(), SNET.c_str());
+#pragma omp critical
+						{
+							// The last layer is LINEAR. z[last] is not considered (= OUT)
+							for (z_it = _zvars->begin(); z_it != _z_last; z_it++, k <<= 1)
+								if (used_mask & k) {
+									ITEM* z_S = z_it->second;
+									string* zBuf = new string("");
+									zBuf->reserve(8 * 1024 * 1024);
+									z_S->sprint(Vars, maxPows, zBuf, true);
+									if (defined->find(z_it->first) == defined->end()) {
+										defined->insert(z_it->first);
+									}
+									*Buf += z_it->first.c_str();
+									*Buf += " = nsqrt(&err,";
+									*Buf += *zBuf;
+									*Buf += ");";
+									*Buf += "\n";
+									delete zBuf;
+								}
+							char sign_buf[65];
+							string STR = __ltoa(signature, sign_buf, 10);
+							STR += " ";
+							STR += *Buf;
+							if (OUT_VAR->at(nout).length() == 0) {
+								STR += "NET<";
+								STR += *SCHEME;
+								STR += "> : ";
+							}
+							else {
+								if (defined->find(OUT_VAR->at(nout)) == defined->end()) {
+									defined->insert(OUT_VAR->at(nout));
+								}
+								STR += OUT_VAR->at(nout);
+								STR += " = ";
+							}
+							STR += *SNET;
+							STR += ";";
+
+							size_t L = STR.length();
+							vector<string>::iterator after = BEST->begin();
+							while (after != BEST->end() && after->length() < L) after++;
+							BEST->insert(after, STR);
+						}
+						delete _S;
+						delete Buf;
+						delete SNET;
+#ifdef TASKED
+						_z_last++;
+						for (z_it = _zvars->begin(); z_it != _z_last; z_it++) {
+							delete z_it->second;
+						}
+						delete _zvars;
+						delete SCHEME;
+					}
+#endif
+				}
 			}
 		}
 
@@ -680,7 +684,7 @@ if (layer == 1) {
 return NULL;
 }
 
-vector<string> network::ANALYZE(int NPP, int maxN, int& NVARIANTS, const std::string& OUT_VAR, set<std::string> * defined, bool Simplify, long double* SMIN, long double* SMAX, int* SFREQ, vector<long double> XX[], vector<long double> YY[]) {
+vector<string> network::ANALYZE(int NPP, int maxN, int& NVARIANTS, const vector<std::string> * OUT_VAR, set<std::string> * defined, bool Simplify, long double* SMIN, long double* SMAX, int* SFREQ, vector<long double> XX[], vector<long double> YY[]) {
 
 	double start_time = omp_get_wtime();
 
@@ -6661,13 +6665,27 @@ public:
 				x = NULL;
 			}
 		}
-		float_number* out = x ? new float_number(in->sim()) : NULL;
-		if (!x || !in || !out || !positional_vals->at(2)->unify(CTX, ff, out)) {
+		if (x && in) {
+			long double res[8192];
+			in->sim(res);
+			stack_container<value*> r;
+			for (unsigned int i = 0; i < in->nY(); i++) {
+				float_number* v = new float_number(in->getY(i));
+				r.push_back(v);
+			}
+			::_list* out = new ::_list(r, NULL);
+			if (!positional_vals->at(2)->unify(CTX, ff, out)) {
+				delete result;
+				result = NULL;
+				delete ff;
+			}
+			if (out) out->free();
+		}
+		else {
 			delete result;
 			result = NULL;
 			delete ff;
 		}
-		if (out) out->free();
 		return result;
 	}
 };
@@ -6798,7 +6816,7 @@ public:
 
 	virtual generated_vars* generate_variants(context* CTX, frame_item* f, vector<value*>*& positional_vals) {
 		if (positional_vals->size() != 5) {
-			std::cout << "nnetff([N1,...,Nn],DAT_FILE,[Xcol1,...XcolK],Ycol,OUT_FILE): incorrect number of arguments!" << endl;
+			std::cout << "nnetff([N1,...,Nn],DAT_FILE,[Xcol1,...XcolK],(Ycol|[Ycol1,...,YcolM]),OUT_FILE): incorrect number of arguments!" << endl;
 			exit(-3);
 		}
 		generated_vars* result = new generated_vars();
@@ -6808,19 +6826,35 @@ public:
 
 		for (int i = 0; i < 5; i++)
 			if (!positional_vals->at(i)->defined()) {
-				std::cout << "nnetff([N1,...,Nn],DAT_FILE,[Xcol1,...XcolK],Ycol,OUT_FILE) indeterminated!" << endl;
+				std::cout << "nnetff([N1,...,Nn],DAT_FILE,[Xcol1,...XcolK],(Ycol|[Ycol1,...,YcolM]),OUT_FILE) indeterminated!" << endl;
 				exit(-3);
 			}
 		::_list* layers = dynamic_cast<::_list*>(positional_vals->at(0));
 		term* dat_file = dynamic_cast<term*>(positional_vals->at(1));
 		::_list* inps = dynamic_cast<::_list*>(positional_vals->at(2));
 		int_number* out = dynamic_cast<int_number*>(positional_vals->at(3));
+		::_list* outn = dynamic_cast<::_list*>(positional_vals->at(3));
 		term* out_file = dynamic_cast<term*>(positional_vals->at(4));
-		if (!layers || !dat_file || !inps || !out || !out_file) {
-			std::cout << "nnetff([N1,...,Nn],DAT_FILE,[Xcol1,...XcolK],Ycol,OUT_FILE) : incorrect arguments types!" << endl;
+		if (!layers || !dat_file || !inps || (!out && !outn) || !out_file) {
+			std::cout << "nnetff([N1,...,Nn],DAT_FILE,[Xcol1,...XcolK],(Ycol|[Ycol1,...,YcolM]),OUT_FILE) : incorrect arguments types!" << endl;
 			exit(-3);
 		}
-		std::string content = network::create(*layers, dat_file->get_name(), *inps, ((int)(0.5 + out->get_value())));
+		vector<int> outnn;
+		if (out)
+			outnn.push_back(((int)(0.5 + out->get_value())));
+		else
+			outn->iterate(
+				[&](value* v) {
+					int_number* item = dynamic_cast<int_number*>(v);
+					if (item)
+						outnn.push_back(((int)(0.5 + item->get_value())));
+					else {
+						std::cout << "nnetff([N1,...,Nn],DAT_FILE,[Xcol1,...XcolK],(Ycol|[Ycol1,...,YcolM]),OUT_FILE) : [Ycol1,...,YcolK] must contain only in numbers!" << endl;
+						exit(-3);
+					}
+				}
+			);
+		std::string content = network::create(*layers, dat_file->get_name(), *inps, outnn);
 		ofstream _out(out_file->get_name());
 		if (!_out || content.length() == 0) {
 			delete result;

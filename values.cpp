@@ -485,11 +485,11 @@ network::network(const network& src) {
 	DAT_FILE_NAME = src.DAT_FILE_NAME;
 	NRows = src.NRows;
 	NCols = src.NCols;
-	for (int i = 0; i < NCols; i++)
-		NCC[i] = src.NCC[i];
 	NL = src.NL;
 	for (int i = 0; i < NL; i++)
 		NN[i] = src.NN[i];
+	for (int i = 0; i < NInputs + NN[NL-1]; i++)
+		NCC[i] = src.NCC[i];
 	best_err = src.best_err;
 
 	memmove(YN, src.YN, sizeof(YN));
@@ -499,13 +499,13 @@ network::network(const network& src) {
 	memmove(mmin, src.mmin, sizeof(mmin));
 	memmove(mmax, src.mmax, sizeof(mmax));
 
-	NUMIN = src.NUMIN;
-	numin = src.numin;
-	NUMAX = src.NUMAX;
-	numax = src.numax;
+	memmove(NUMIN, src.NUMIN, sizeof(NUMIN));
+	memmove(NUMAX, src.NUMAX, sizeof(NUMAX));
+	memmove(numin, src.numin, sizeof(numin));
+	memmove(numax, src.numax, sizeof(numax));
 
 	memmove(d, src.d, sizeof(d));
-	nud = src.nud;
+	memmove(nud, src.nud, sizeof(nud));
 
 	NW = src.NW;
 	NB = src.NB;
@@ -525,31 +525,33 @@ network::network(const network& src) {
 
 	memmove(tempX, src.tempX, sizeof(tempX));
 
-	for (int i = 0; i < src.NCols; i++)
+	for (int i = 0; i < src.NInputs; i++)
 		if (src.X[i]) {
 			X[i] = new long double[src.NRows];
 			memmove(X[i], src.X[i], src.NRows * sizeof(long double));
 		}
 		else
 			X[i] = NULL;
-	if (src.Y) {
-		Y = new long double[src.NRows];
-		memmove(Y, src.Y, src.NRows * sizeof(long double));
+	for (int i = 0; i < NN[NL - 1]; i++) {
+		if (src.Y[i]) {
+			Y[i] = new long double[src.NRows];
+			memmove(Y[i], src.Y[i], src.NRows * sizeof(long double));
+		}
+		else
+			Y[i] = NULL;
+		if (src.YS[i]) {
+			YS[i] = new long double[src.NRows];
+			memmove(YS[i], src.YS[i], src.NRows * sizeof(long double));
+		}
+		else
+			YS[i] = NULL;
+		if (src.ERR[i]) {
+			ERR[i] = new long double[src.NRows];
+			memmove(ERR[i], src.ERR[i], src.NRows * sizeof(long double));
+		}
+		else
+			ERR[i] = NULL;
 	}
-	else
-		Y = NULL;
-	if (src.YS) {
-		YS = new long double[src.NRows];
-		memmove(YS, src.YS, src.NRows * sizeof(long double));
-	}
-	else
-		YS = NULL;
-	if (src.ERR) {
-		ERR = new long double[src.NRows];
-		memmove(ERR, src.ERR, src.NRows * sizeof(long double));
-	}
-	else
-		ERR = NULL;
 }
 
 network::network(const std::string& FName, const std::string& content) {
@@ -559,7 +561,7 @@ network::network(const std::string& FName, const std::string& content) {
 	istringstream NET(content);
 	std::string Buf;
 	while (!NET.eof() && (Buf.size() < 3 || Buf[0] != '-' || Buf[1] != '-' || Buf[2] != '-'))
-		getline(NET, Buf);
+		std::getline(NET, Buf);
 
 	if (NET.eof()) {
 		printf("No NET data in the NET FILE\n");
@@ -570,7 +572,7 @@ network::network(const std::string& FName, const std::string& content) {
 	size_t cpos1 = FNAME.rfind('\\');
 	size_t cpos2 = FNAME.rfind('/');
 	do {
-		getline(NET, DAT_FILE_NAME);
+		std::getline(NET, DAT_FILE_NAME);
 		if (DAT_FILE_NAME.length()) {
 			if (DAT_FILE_NAME[DAT_FILE_NAME.length() - 1] == '\n')
 				DAT_FILE_NAME.resize(DAT_FILE_NAME.length() - 1);
@@ -592,13 +594,43 @@ network::network(const std::string& FName, const std::string& content) {
 	NET >> NRows;
 	NET >> NCols;
 
-	for (int i = 0; i <= NInputs; i++)
-		NET >> NCC[i];
+	auto read_array = [&](long double* ARR)->unsigned int {
+		string LINE;
+		do {
+			std::getline(NET, LINE);
+			LINE.erase(LINE.begin(), std::find_if(LINE.begin(), LINE.end(), [](unsigned char c) { return !std::isspace(c); }));
+		} while (LINE.size() == 0);
+		istringstream GET(LINE);
+		unsigned int ptr = 0;
+		while (GET >> ARR[ptr])
+			ptr++;
+		return ptr;
+	};
+
+	auto read_int_array = [&](int* ARR)->unsigned int {
+		string LINE;
+		do {
+			std::getline(NET, LINE);
+			LINE.erase(LINE.begin(), std::find_if(LINE.begin(), LINE.end(), [](unsigned char c) { return !std::isspace(c); }));
+		} while (LINE.size() == 0);
+		istringstream GET(LINE);
+		unsigned int ptr = 0;
+		while (GET >> ARR[ptr])
+			ptr++;
+		return ptr;
+	};
+
+	int NCN = read_int_array(NCC);
+	if (NCN < NInputs + 1) {
+		printf("COLS array is too small?\n");
+		exit(-12);
+	}
 
 	string BUF;
-	getline(NET, BUF);
-	getline(NET, BUF);
-	getline(NET, BUF);
+	do {
+		std::getline(NET, BUF);
+		BUF.erase(BUF.begin(), std::find_if(BUF.begin(), BUF.end(), [](unsigned char c) { return !std::isspace(c); }));
+	} while (BUF.size() == 0);
 	istringstream SZ(BUF);
 	int number;
 	NL = 0;
@@ -606,8 +638,8 @@ network::network(const std::string& FName, const std::string& content) {
 		NN[NL++] = number;
 	}
 
-	if (NL == 0 || NN[NL - 1] != 1) {
-		printf("In this version ONLY 1-output nets are processed\n");
+	if (NL == 0) {
+		printf("EMPTY NET detected!!!\n");
 		exit(-13);
 	}
 
@@ -620,8 +652,10 @@ network::network(const std::string& FName, const std::string& content) {
 	W = new long double[NW];
 	B = new long double[NB];
 
-	YS = new long double[NRows];
-	ERR = new long double[NRows];
+	for (int i = 0; i < NN[NL - 1]; i++) {
+		YS[i] = new long double[NRows];
+		ERR[i] = new long double[NRows];
+	}
 
 	NET >> best_err;
 
@@ -633,16 +667,23 @@ network::network(const std::string& FName, const std::string& content) {
 		NET >> mmin[i];
 	for (int i = 0; i < NInputs; i++)
 		NET >> mmax[i];
-	NET >> NUMIN;
-	NET >> NUMAX;
-	NET >> numin;
-	NET >> numax;
+
+	int N1 = read_array(NUMIN);
+	int N2 = read_array(NUMAX);
+	int N3 = read_array(numin);
+	int N4 = read_array(numax);
+
+	if (N1 != N2 || N1 != N3 || N1 != N4 || N1 != NN[NL-1]) {
+		printf("NUMIN/NUMAX/numin/numax : incorrect number of outputs?\n");
+		exit(-14);
+	}
 
 	for (int p = 0; p < NInputs; p++) {
 		d[p] = MMAX[p] == MMIN[p] ? 1.0 : (mmax[p] - mmin[p]) / (MMAX[p] - MMIN[p]);
 	}
 
-	nud = NUMAX == NUMIN ? 1.0 : (numax - numin) / (NUMAX - NUMIN);
+	for (int p = 0; p < NN[NL-1]; p++)
+		nud[p] = NUMAX[p] == NUMIN[p] ? 1.0 : (numax[p] - numin[p]) / (NUMAX[p] - NUMIN[p]);
 
 	auto read_val = [&](istringstream& NET, long double& W) {
 		string token;
@@ -666,7 +707,7 @@ network::network(const std::string& FName, const std::string& content) {
 			NET >> B[ptr];
 }
 
-network::network(network* templ, int ni, int n1, int n2, bool first, bool last) {
+network::network(network* templ, int ni, int n1, int n2, bool first, bool last, int out) {
 	MAXPROBES = max(2, (int)(getTotalSystemMemory() / ((long long)1024 * 1024 * 1024)));
 	YN = new LAYER[MAXPROBES];
 	FNAME = templ->FNAME;
@@ -677,8 +718,9 @@ network::network(network* templ, int ni, int n1, int n2, bool first, bool last) 
 	NRows = templ->NRows;
 	NCols = templ->NCols;
 
-	for (int i = 0; i <= ni; i++)
+	for (int i = 0; i < ni; i++)
 		NCC[i] = templ->NCC[i];
+	NCC[ni] = templ->NCC[ni + out];
 
 	NL = 3;
 
@@ -695,8 +737,10 @@ network::network(network* templ, int ni, int n1, int n2, bool first, bool last) 
 	W = new long double[NW];
 	B = new long double[NB];
 
-	YS = new long double[NRows];
-	ERR = new long double[NRows];
+	for (int i = 0; i < NN[NL - 1]; i++) {
+		YS[i] = new long double[NRows];
+		ERR[i] = new long double[NRows];
+	}
 
 	best_err = templ->best_err;
 
@@ -708,16 +752,21 @@ network::network(network* templ, int ni, int n1, int n2, bool first, bool last) 
 		mmin[i] = first ? templ->mmin[i] : 0.0;
 	for (int i = 0; i < NInputs; i++)
 		mmax[i] = first ? templ->mmax[i] : 1.0;
-	NUMIN = last ? templ->NUMIN : 0.0;
-	NUMAX = last ? templ->NUMAX : 1.0;
-	numin = last ? templ->numin : 0.0;
-	numax = last ? templ->numax : 1.0;
+	for (int i = 0; i < NN[NL-1]; i++)
+		NUMIN[i] = last ? templ->NUMIN[i] : 0.0;
+	for (int i = 0; i < NN[NL - 1]; i++)
+		NUMAX[i] = last ? templ->NUMAX[i] : 1.0;
+	for (int i = 0; i < NN[NL - 1]; i++)
+		numin[i] = last ? templ->numin[i] : 0.0;
+	for (int i = 0; i < NN[NL - 1]; i++)
+		numax[i] = last ? templ->numax[i] : 1.0;
 
 	for (int p = 0; p < NInputs; p++) {
 		d[p] = MMAX[p] == MMIN[p] ? 1.0 : (mmax[p] - mmin[p]) / (MMAX[p] - MMIN[p]);
 	}
 
-	nud = NUMAX == NUMIN ? 1.0 : (numax - numin) / (NUMAX - NUMIN);
+	for (int p = 0; p < NN[NL - 1]; p++)
+		nud[p] = NUMAX[p] == NUMIN[p] ? 1.0 : (numax[p] - numin[p]) / (NUMAX[p] - NUMIN[p]);
 
 	int ptr = 0;
 	for (int layer = 0; layer < NL; layer++) {
@@ -734,7 +783,8 @@ network::network(network* templ, int ni, int n1, int n2, bool first, bool last) 
 	for (int s = 0; s < NInputs; s++)
 		X[s] = new long double[NRows];
 
-	Y = new long double[NRows];
+	for (int s = 0; s < NN[NL-1]; s++)
+		Y[s] = new long double[NRows];
 }
 
 const std::string& network::fname() { return FNAME; }
@@ -751,13 +801,26 @@ void network::set_rowX(unsigned int i, long double v) {
 
 unsigned int network::nX() { return NInputs; }
 
-long double network::sim() { return NUMIN + (NET(-1) - numin) / nud; }
+unsigned int network::nY() {
+	return NN[NL - 1];
+}
+
+long double network::getY(int i) {
+	return YN[0][NL - 1][i];
+}
+
+void network::sim(long double * result) {
+	NET(-1);
+	for (int i = 0; i < NN[NL-1]; i++)
+		result[i] = NUMIN[i] + (YN[0][NL-1][i] - numin[i]) / nud[i];
+}
 
 bool network::load_data() {
 	for (int i = 0; i < NInputs; i++)
 		X[i] = new long double[NRows];
 
-	Y = new long double[NRows];
+	for (int i = 0; i < NN[NL-1]; i++)
+		Y[i] = new long double[NRows];
 
 	ifstream DAT(DAT_FILE_NAME);
 	if (DAT) {
@@ -767,7 +830,8 @@ bool network::load_data() {
 				DAT >> VALS[j];
 			for (int j = 0; j < NInputs; j++)
 				X[j][i] = mmin[j] + (VALS[NCC[j]] - MMIN[j]) * d[j];
-			Y[i] = numin + (VALS[NCC[NInputs]] - NUMIN) * nud;
+			for (int j = 0; j < NN[NL-1]; j++)
+				Y[j][i] = numin[j] + (VALS[NCC[NInputs + j]] - NUMIN[j]) * nud[j];
 		}
 		DAT.close();
 	}
@@ -780,20 +844,22 @@ bool network::load_data() {
 }
 
 void network::unload_data() {
-	delete[] Y;
+	for (int i = 0; i < NN[NL - 1]; i++) {
+		delete[] Y[i];
+		Y[i] = NULL;
+	}
 
 	for (int i = 0; i < NInputs; i++) {
 		delete[] X[i];
 		X[i] = NULL;
 	}
-	Y = NULL;
 }
 
 long double network::S(long double s) {
 	return 1.0 / (1.0 + exp(-s));
 }
 
-long double network::PERTURBED_NET(int i, long double* SMIN, long double* SMAX, vector<long double>* XX, vector<long double>* YY) {
+void network::PERTURBED_NET(int i, long double* SMIN, long double* SMAX, vector<long double>* XX, vector<long double>* YY) {
 	int id = omp_get_thread_num();
 
 	long double* _W = new long double[NW];
@@ -804,7 +870,7 @@ long double network::PERTURBED_NET(int i, long double* SMIN, long double* SMAX, 
 	_W[coord_w[id]] += d_w[id];
 	_B[coord_b[id]] += d_b[id];
 
-	for (int i = 0; i < NL - 1; i++)
+	for (int i = 0; i < NL; i++)
 		memset(&YN[id][i], 0, NN[i] * sizeof(long double));
 	int ptr = 0;
 	if (i >= 0)
@@ -843,32 +909,34 @@ long double network::PERTURBED_NET(int i, long double* SMIN, long double* SMAX, 
 		}
 	}
 
-	long double res = _B[ptr1];
-	for (int k = 0; k < NN[NL - 2]; k++, ptr++) {
-		res += YN[id][NL - 2][k] * _W[ptr];
-	}
-	if (XX) XX[ptr1].push_back(res);
-	if (YY) YY[ptr1].push_back(res);
+	int idx = 0;
+	for (int i = 0; i < NL - 1; i++)
+		idx += NN[i];
 
-	if (SMIN && SMAX) {
-		int idx = 0;
-		for (int i = 0; i < NL - 1; i++)
-			idx += NN[i];
-		if (res < SMIN[idx]) SMIN[idx] = res;
-		if (res > SMAX[idx]) SMAX[idx] = res;
+	for (int q = 0; q < NN[NL - 1]; q++, ptr1++) {
+		long double res = _B[ptr1];
+		for (int k = 0; k < NN[NL - 2]; k++, ptr++) {
+			res += YN[id][NL - 2][k] * _W[ptr];
+		}
+		if (XX) XX[ptr1].push_back(res);
+		if (YY) YY[ptr1].push_back(res);
+
+		if (SMIN && SMAX) {
+			if (res < SMIN[idx]) SMIN[idx] = res;
+			if (res > SMAX[idx]) SMAX[idx] = res;
+			idx++;
+		}
+		YN[id][NL - 1][q] = res;
 	}
 
 	delete[] _B;
 	delete[] _W;
-
-	return res;
 }
 
-long double network::NET(int i, long double* SMIN, long double* SMAX, vector<long double>* XX, vector<long double>* YY) {
+void network::NET(int i, long double* SMIN, long double* SMAX, vector<long double>* XX, vector<long double>* YY) {
 	int id = omp_get_thread_num();
-	for (int i = 0; i < NL - 1; i++)
+	for (int i = 0; i < NL; i++)
 		memset(&YN[id][i], 0, NN[i] * sizeof(long double));
-	long double res = 0.0;
 	int ptr = 0;
 	int ptr1 = 0;
 #ifdef __APPLE__
@@ -928,12 +996,14 @@ long double network::NET(int i, long double* SMIN, long double* SMAX, vector<lon
 			}
 			__Y0 = mlx::core::sigmoid(__Y0);
 		}
-		auto __W2 = mlx::core::array(_W.data() + ptr, { NN[NL - 2] }, mlx::core::float32);
-		ptr += NN[NL - 2];
-		__Y0 = mlx::core::matmul(__Y0, mlx::core::transpose(__W2));
+		auto __W2 = mlx::core::array(_W.data() + ptr, { NN[NL - 2], NN[NL-1] }, mlx::core::float32);
+		auto __B2 = mlx::core::array(_B.data() + ptr1, { NN[NL-1] }, mlx::core::float32);
+		__Y0 = mlx::core::matmul(__Y0, __W2) + __B2;
+		ptr += NN[NL - 2] * NN[NL - 1];
 		mlx::core::eval(__Y0);
 		const float* y1 = __Y0.data<float>();
-		res += B[ptr1] + y1[0];
+		for (int k = 0; k < NN[NL-1]; k++)
+			YN[id][NL-1][k] = y1[k];
 	}
 #endif
 	if (id < nCPUs) {
@@ -975,29 +1045,36 @@ long double network::NET(int i, long double* SMIN, long double* SMAX, vector<lon
 				if (YY) YY[ptr1].push_back(YN[id][layer][k]);
 			}
 		}
-		res += B[ptr1];
-		for (int k = 0; k < NN[NL - 2]; k++, ptr++) {
-			res += YN[id][NL - 2][k] * W[ptr];
+		for (int q = 0; q < NN[NL - 1]; q++) {
+			long double res = B[ptr1 + q];
+			for (int k = 0; k < NN[NL - 2]; k++, ptr++) {
+				res += YN[id][NL - 2][k] * W[ptr];
+			}
+			YN[id][NL - 1][q] = res;
 		}
 	}
 
-	if (XX) XX[ptr1].push_back(res);
-	if (YY) YY[ptr1].push_back(res);
+	int idx = 0;
+	for (int i = 0; i < NL - 1; i++)
+		idx += NN[i];
 
-	if (SMIN && SMAX) {
-		int idx = 0;
-		for (int i = 0; i < NL - 1; i++)
-			idx += NN[i];
-		if (res < SMIN[idx]) SMIN[idx] = res;
-		if (res > SMAX[idx]) SMAX[idx] = res;
+	for (int q = 0; q < NN[NL - 1]; q++, ptr1++) {
+		long double res = YN[id][NL - 1][q];
+
+		if (XX) XX[ptr1].push_back(res);
+		if (YY) YY[ptr1].push_back(res);
+
+		if (SMIN && SMAX) {
+			if (res < SMIN[idx]) SMIN[idx] = res;
+			if (res > SMAX[idx]) SMAX[idx] = res;
+			idx++;
+		}
 	}
-
-	return res;
 }
 
 bool network::train(int MAX_EPOCHS) {
 	bool non_compact = false;
-	if (!Y) non_compact = load_data();
+	if (!Y[0]) non_compact = load_data();
 
 	const double nu = 0.01;
 	const double alpha = 0.2;
@@ -1059,9 +1136,11 @@ bool network::train(int MAX_EPOCHS) {
 							break;
 						}
 					} while (true);
-					long double ys = PERTURBED_NET(i);
-					long double delta = ys - Y[i];
-					dd += delta * delta;
+					PERTURBED_NET(i);
+					for (int q = 0; q < NN[NL - 1]; q++) {
+						long double delta = YN[id][NL-1][q] - Y[q][i];
+						dd += delta * delta;
+					}
 				}
 				if (dd < DD[id]) {
 					w = coord_w[id];
@@ -1091,65 +1170,70 @@ bool network::train(int MAX_EPOCHS) {
 		for (int ii = 0; ii < NRows; ii++) {
 			int i = idxs[ii];
 
-			YS[i] = NET(i);
-			long double delta = YS[i] - Y[i];
+			NET(i);
+			long double delta;
+			int NLAST = NN[NL - 1];
+			for (int q = 0; q < NLAST; q++) {
+				YS[q][i] = YN[0][NL - 1][q];
+				delta = YS[q][i] - Y[q][i];
 
-			YYS += delta * delta;
+				YYS += delta * delta;
 
-			ERR[i] = fabs(delta);
-			err += ERR[i];
+				ERR[q][i] = fabs(delta);
+				err += ERR[q][i];
 
-			DB[NB - 1] = isinf(B[NB - 1]) ? 0.0 : alpha * DB[NB - 1] + (1 - alpha) * (-nu * delta);
-			B[NB - 1] += DB[NB - 1];
+				DB[NB - NLAST + q] = isinf(B[NB - NLAST + q]) ? 0.0 : alpha * DB[NB - NLAST + q] + (1 - alpha) * (-nu * delta);
+				B[NB - NLAST + q] += DB[NB - NLAST + q];
 
-			int ptr = NW - 1;
-			for (int k = NN[NL - 2] - 1; k >= 0; k--, ptr--) {
-				DW[ptr] = isinf(W[ptr]) ? 0.0 : alpha * DW[ptr] + (1 - alpha) * (-nu * delta * YN[0][NL - 2][k]);
-				W[ptr] += DW[ptr];
-			}
-
-			long double deltas[8192] = { 0.0 };
-
-			ptr = NW - 1;
-			for (int k = NN[NL - 2] - 1; k >= 0; k--, ptr--) {
-				deltas[k] = YN[0][NL - 2][k] * (1.0 - YN[0][NL - 2][k]) * delta * W[ptr];
-			}
-
-			int ptrw = ptr;
-			int ptrb = NB - 2;
-			for (int layer = NL - 2; layer > 0; layer--) {
-				ptr = ptrw;
-				for (int j = NN[layer - 1] - 1; j >= 0; j--)
-					for (int k = NN[layer] - 1; k >= 0; k--, ptrw--) {
-						DW[ptrw] = isinf(W[ptrw]) ? 0.0 : alpha * DW[ptrw] + (1 - alpha) * (-nu * deltas[k] * YN[0][layer - 1][j]);
-						W[ptrw] += DW[ptrw];
-					}
-				for (int k = NN[layer] - 1; k >= 0; k--, ptrb--) {
-					DB[ptrb] = isinf(B[ptrb]) ? 0.0 : alpha * DB[ptrb] + (1 - alpha) * (-nu * deltas[k]);
-					B[ptrb] += DB[ptrb];
-				}
-
-				long double deltas1[8192] = { 0.0 };
-
-				for (int j = NN[layer - 1] - 1; j >= 0; j--)
-					for (int k = NN[layer] - 1; k >= 0; k--, ptr--) {
-						deltas1[j] += YN[0][layer - 1][j] * (1.0 - YN[0][layer - 1][j]) * deltas[k] * W[ptr];
-					}
-				for (int j = 0; j < NN[layer - 1]; j++)
-					deltas[j] = deltas1[j];
-			}
-			ptr = 0;
-			for (int j = 0; j < NInputs; j++)
-				for (int k = 0; k < NN[0]; k++, ptr++) {
-					DW[ptr] = isinf(W[ptr]) ? 0.0 : alpha * DW[ptr] + (1 - alpha) * (-nu * deltas[k] * X[j][i]);
+				int ptr = NW - (NLAST - q) * NN[NL - 2];
+				for (int k = 0; k < NN[NL - 2]; k++, ptr++) {
+					DW[ptr] = isinf(W[ptr]) ? 0.0 : alpha * DW[ptr] + (1 - alpha) * (-nu * delta * YN[0][NL - 2][k]);
 					W[ptr] += DW[ptr];
 				}
-			for (int k = 0; k < NN[0]; k++) {
-				DB[k] = isinf(B[k]) ? 0.0 : alpha * DB[k] + (1 - alpha) * (-nu * deltas[k]);
-				B[k] += DB[k];
+
+				long double deltas[8192] = { 0.0 };
+
+				ptr = NW - (NLAST - q) * NN[NL - 2];
+				for (int k = 0; k < NN[NL - 2]; k++, ptr++) {
+					deltas[k] = YN[0][NL - 2][k] * (1.0 - YN[0][NL - 2][k]) * delta * W[ptr];
+				}
+
+				int ptrw = NW - NLAST * NN[NL - 2] - 1;
+				int ptrb = NB - NLAST - 1;
+				for (int layer = NL - 2; layer > 0; layer--) {
+					ptr = ptrw;
+					for (int j = NN[layer - 1] - 1; j >= 0; j--)
+						for (int k = NN[layer] - 1; k >= 0; k--, ptrw--) {
+							DW[ptrw] = isinf(W[ptrw]) ? 0.0 : alpha * DW[ptrw] + (1 - alpha) * (-nu * deltas[k] * YN[0][layer - 1][j]);
+							W[ptrw] += DW[ptrw];
+						}
+					for (int k = NN[layer] - 1; k >= 0; k--, ptrb--) {
+						DB[ptrb] = isinf(B[ptrb]) ? 0.0 : alpha * DB[ptrb] + (1 - alpha) * (-nu * deltas[k]);
+						B[ptrb] += DB[ptrb];
+					}
+
+					long double deltas1[8192] = { 0.0 };
+
+					for (int j = NN[layer - 1] - 1; j >= 0; j--)
+						for (int k = NN[layer] - 1; k >= 0; k--, ptr--) {
+							deltas1[j] += YN[0][layer - 1][j] * (1.0 - YN[0][layer - 1][j]) * deltas[k] * W[ptr];
+						}
+					for (int j = 0; j < NN[layer - 1]; j++)
+						deltas[j] = deltas1[j];
+				}
+				ptr = 0;
+				for (int j = 0; j < NInputs; j++)
+					for (int k = 0; k < NN[0]; k++, ptr++) {
+						DW[ptr] = isinf(W[ptr]) ? 0.0 : alpha * DW[ptr] + (1 - alpha) * (-nu * deltas[k] * X[j][i]);
+						W[ptr] += DW[ptr];
+					}
+				for (int k = 0; k < NN[0]; k++) {
+					DB[k] = isinf(B[k]) ? 0.0 : alpha * DB[k] + (1 - alpha) * (-nu * deltas[k]);
+					B[k] += DB[k];
+				}
 			}
 		}
-		err /= NRows;
+		err /= NRows * NN[NL - 1];
 		double stop = !probed ? omp_get_wtime() : 0.0;
 		if (!probed) {
 			double time = stop - start;
@@ -1182,11 +1266,14 @@ bool network::train(int MAX_EPOCHS) {
 			real_err = 0.0;
 			for (int ii = 0; ii < NRows; ii++) {
 				int i = idxs[ii];
-				YS[i] = NET(i);
-				long double delta = YS[i] - Y[i];
-				real_err += fabs(delta);
+				NET(i);
+				for (int q = 0; q < NN[NL - 1]; q++) {
+					YS[q][i] = YN[0][NL - 1][q];
+					long double delta = YS[q][i] - Y[q][i];
+					real_err += fabs(delta);
+				}
 			}
-			printf("%i epochs reached, err = [%lf (really = %lf) / %i] = %lf (really = %lf)\n", epochs, (double)(err * NRows), real_err, NRows, (double)err, (double)(real_err / NRows));
+			printf("%i epochs reached, err = [%lf (really = %lf) / %i] = %lf (really = %lf)\n", epochs, (double)(err * NRows * NN[NL-1]), real_err, NRows, (double)err, (double)(real_err / (NRows * NN[NL-1])));
 			fflush(stdout);
 		}
 		if (YYS > YYS0)
@@ -1208,21 +1295,23 @@ bool network::train(int MAX_EPOCHS) {
 	return result;
 }
 
-vector<std::string> network::simplify(bool to_chain, int maxN, int NVARIANTS, const std::string& OUT_VAR, set<std::string>& defined) {
+vector<std::string> network::simplify(bool to_chain, int maxN, int NVARIANTS, const vector<std::string> * OUT_VAR, set<std::string>& defined) {
 	bool non_compact = false;
-	if (!Y) non_compact = load_data();
+	if (!Y[0]) non_compact = load_data();
 
 	long double err = 0.0;
 	for (int i = 0; i < NRows; i++) {
-		YS[i] = NET(i);
-
-		long double delta = YS[i] - Y[i];
-		ERR[i] = fabs(delta);
-		err += ERR[i];
+		NET(i);
+		for (int q = 0; q < NN[NL - 1]; q++) {
+			YS[q][i] = YN[0][NL - 1][q];
+			long double delta = YS[q][i] - Y[q][i];
+			ERR[q][i] = fabs(delta);
+			err += ERR[q][i];
+		}
 	}
-	err /= NRows;
+	err /= NRows * NN[NL-1];
 
-	long double err1 = err * NRows;
+	long double err1 = err * NRows * NN[NL-1];
 
 	long double tol_err = err1 * 1.05;
 
@@ -1235,8 +1324,11 @@ vector<std::string> network::simplify(bool to_chain, int maxN, int NVARIANTS, co
 				long double save = W[j];
 				W[j] = 0.0;
 				long double err2 = 0.0;
-				for (int i = 0; i < NRows; i++)
-					err2 += fabs(Y[i] - NET(i));
+				for (int i = 0; i < NRows; i++) {
+					NET(i);
+					for (int q = 0; q < NN[NL-1]; q++)
+						err2 += fabs(Y[q][i] - YN[0][NL-1][q]);
+				}
 				if (err2 >= err1 && err2 - err1 < min_delta) {
 					min_delta = err2 - err1;
 					min_n_w = j;
@@ -1291,15 +1383,18 @@ vector<std::string> network::simplify(bool to_chain, int maxN, int NVARIANTS, co
 
 	if (non_compact) unload_data();
 
+	filter_simplification(result);
 	return result;
 }
 
 network::~network() {
 	delete[] W;
 	delete[] B;
-	delete[] Y;
-	delete[] YS;
-	delete[] ERR;
+	for (int i = 0; i < NN[NL - 1]; i++) {
+		delete[] Y[i];
+		delete[] YS[i];
+		delete[] ERR[i];
+	}
 
 	for (int i = 0; i < NInputs; i++)
 		delete[] X[i];
@@ -1327,8 +1422,9 @@ bool network::equals(network* from) {
 		if (mmax[i] != from->mmax[i]) return false;
 	}
 
-	if (NUMIN != from->NUMIN || numin != from->numin ||
-		NUMAX != from->NUMAX || numax != from->numax) return false;
+	for (int i = 0; i < NN[NL-1]; i++)
+		if (NUMIN[i] != from->NUMIN[i] || numin[i] != from->numin[i] ||
+			NUMAX[i] != from->NUMAX[i] || numax[i] != from->numax[i]) return false;
 
 	if (NW != from->NW || NB != from->NB) return false;
 	for (int i = 0; i < NW; i++)
@@ -1352,7 +1448,7 @@ const string network::get() {
 
 	NET << NRows << " " << NCols << "\n\n";
 
-	for (int i = 0; i <= NInputs; i++)
+	for (int i = 0; i < NInputs + NN[NL-1]; i++)
 		NET << NCC[i] << " ";
 	NET << "\n\n";
 
@@ -1373,10 +1469,18 @@ const string network::get() {
 	for (int i = 0; i < NInputs; i++)
 		NET << setprecision(15) << mmax[i] << " ";
 	NET << "\n\n";
-	NET << setprecision(15) << NUMIN << "\n";
-	NET << setprecision(15) << NUMAX << "\n\n";
-	NET << setprecision(15) << numin << "\n";
-	NET << setprecision(15) << numax << "\n\n";
+	for (int i = 0; i < NN[NL-1]; i++)
+		NET << setprecision(15) << NUMIN[i] << " ";
+	NET << "\n";
+	for (int i = 0; i < NN[NL-1]; i++)
+		NET << setprecision(15) << NUMAX[i] << " ";
+	NET << "\n\n";
+	for (int i = 0; i < NN[NL-1]; i++)
+		NET << setprecision(15) << numin[i] << " ";
+	NET << "\n";
+	for (int i = 0; i < NN[NL-1]; i++)
+		NET << setprecision(15) << numax[i] << " ";
+	NET << "\n\n";
 	int ptr = 0;
 	for (int layer = 0; layer < NL; layer++) {
 		int NP = layer == 0 ? NInputs : NN[layer - 1];
@@ -1397,7 +1501,7 @@ const string network::get() {
 	return NET.str();
 }
 
-std::string network::create(::_list& nlayers, const std::string& dat_file, ::_list& inps, int out) {
+std::string network::create(::_list& nlayers, const std::string& dat_file, ::_list& inps, const vector<int> & out) {
 	ostringstream NET;
 
 	NET << "Net file after additional training by the nnets_simplify\n";
@@ -1418,16 +1522,29 @@ std::string network::create(::_list& nlayers, const std::string& dat_file, ::_li
 			return "";
 		_NCC[i - 1] = ((int)(0.5 + v->get_value()));
 	}
+	if (nlayers.size() == 0)
+		return "";
+	int_number* _NLAST = dynamic_cast<int_number*>(nlayers.get_nth(nlayers.size(), false));
+	if (!_NLAST)
+		return "";
+	int NLAST = ((int)(0.5 + _NLAST->get_value()));
+
+	if (NLAST != out.size())
+		return "";
 
 	std::string line;
 	long double VALS[1024];
 	long double _MMIN[1024];
 	long double _MMAX[1024];
-	long double _NUMIN = 1E300;
-	long double _NUMAX = -1E300;
+	long double _NUMIN[1024];
+	long double _NUMAX[1024];
 	for (int i = 0; i < inps.size(); i++) {
 		_MMIN[i] = 1E300;
 		_MMAX[i] = -1E300;
+	}
+	for (int i = 0; i < NLAST; i++) {
+		_NUMIN[i] = 1E300;
+		_NUMAX[i] = -1E300;
 	}
 	size_t NR = 0;
 	size_t NC = 0;
@@ -1446,18 +1563,20 @@ std::string network::create(::_list& nlayers, const std::string& dat_file, ::_li
 				if (v > _MMAX[j])
 					_MMAX[j] = v;
 			}
-			long double ov = VALS[out];
-			if (ov < _NUMIN)
-				_NUMIN = ov;
-			if (ov > _NUMAX)
-				_NUMAX = ov;
+			for (int q = 0; q < NLAST; q++) {
+				long double ov = VALS[out[q]];
+				if (ov < _NUMIN[q])
+					_NUMIN[q] = ov;
+				if (ov > _NUMAX[q])
+					_NUMAX[q] = ov;
+			}
 			NR++;
 		}
 	}
 
 	dat.close();
 
-	if (NC > inps.size() + 1)
+	if (NC > inps.size() + NLAST)
 		return "";
 
 	NET << NR << " " << NC << "\n\n";
@@ -1467,9 +1586,14 @@ std::string network::create(::_list& nlayers, const std::string& dat_file, ::_li
 			return "";
 		NET << _NCC[i - 1] << " ";
 	}
-	if (out >= NC)
-		return "";
-	NET << out << "\n\n";
+	for (int q = 0; q < NLAST; q++) {
+		if (out[q] >= NC)
+			return "";
+		NET << out[q];
+		if (q < NLAST - 1)
+			NET << " ";
+	}
+	NET << "\n\n";
 
 	for (int i = 1; i <= nlayers.size(); i++) {
 		int_number* v = dynamic_cast<int_number*>(nlayers.get_nth(i, false));
@@ -1492,10 +1616,18 @@ std::string network::create(::_list& nlayers, const std::string& dat_file, ::_li
 	for (int i = 0; i < inps.size(); i++)
 		NET << setprecision(15) << +1 << " ";
 	NET << "\n\n";
-	NET << setprecision(15) << _NUMIN << "\n";
-	NET << setprecision(15) << _NUMAX << "\n\n";
-	NET << setprecision(15) << -1 << "\n";
-	NET << setprecision(15) << +1 << "\n\n";
+	for (int i = 0; i < NLAST; i++)
+		NET << setprecision(15) << _NUMIN[i] << " ";
+	NET << "\n";
+	for (int i = 0; i < NLAST; i++)
+		NET << setprecision(15) << _NUMAX[i] << " ";
+	NET << "\n\n";
+	for (int i = 0; i < NLAST; i++)
+		NET << setprecision(15) << -1 << " ";
+	NET << "\n";
+	for (int i = 0; i < NLAST; i++)
+		NET << setprecision(15) << +1 << " ";
+	NET << "\n\n";
 
 	auto rd = std::random_device{};
 	auto rng = std::default_random_engine{ rd() };
@@ -1709,13 +1841,17 @@ block_network::block_network(const std::string& FName, const std::string& conten
 		int BBASE3 = BBASE2 + NN[layer - 1];
 		int nw[8192] = { 0 };
 		int nb[8192] = { 0 };
+		if (N1 == 0 || N2 == 0) {
+			cout << "Can't granularize network. Reason: number of outputs is greater than number of neurons in middle layers!\n";
+			exit(-153);
+		}
 		for (int N = 0; N < NOUTS; N++) {
 			int _N1 = N1;
 			if (N < rN1) _N1++;
 			int _N2 = N2;
 			if (N < rN2) _N2++;
 
-			NETWORKS[n_networks + N] = new network(this, n, _N1, _N2, layer == 2, layer == NL - 1);
+			NETWORKS[n_networks + N] = new network(this, n, _N1, _N2, layer == 2, layer == NL - 1, layer < NL - 1 ? 0 : N);
 
 			int _BBASE = BBASE + N;
 			for (int i = 0; i < _N1; i++, nb[N]++) {
@@ -1770,7 +1906,7 @@ block_network::block_network(const std::string& FName, const std::string& conten
 	}
 
 	for (int i = 0; i < NRows; i++) {
-		YN[0][NL - 1][0] = network::NET(i);
+		network::NET(i);
 
 		n_networks = 0;
 		BBASE = 0;
@@ -1783,7 +1919,7 @@ block_network::block_network(const std::string& FName, const std::string& conten
 					NETWORKS[n_networks]->X[j][i] = x;
 				}
 				double y = YN[0][layer][N];
-				NETWORKS[n_networks]->Y[i] = y;
+				NETWORKS[n_networks]->Y[0][i] = y;
 			}
 		}
 	}
@@ -1868,7 +2004,7 @@ bool block_network::train(int MAX_EPOCHS) {
 	return result;
 }
 
-long double block_network::PERTURBED_NET(int i, long double* SMIN, long double* SMAX, vector<long double>* XX, vector<long double>* YY) {
+void block_network::PERTURBED_NET(int i, long double* SMIN, long double* SMAX, vector<long double>* XX, vector<long double>* YY) {
 	int id = omp_get_thread_num();
 	int BBASE = 0;
 	n_networks = 0;
@@ -1883,15 +2019,14 @@ long double block_network::PERTURBED_NET(int i, long double* SMIN, long double* 
 			else
 				for (int k = 0; k < NETWORKS[n_networks]->NInputs; k++)
 					NETWORKS[n_networks]->set_rowX(k, _XX[k]);
-			_XX[N] = NETWORKS[n_networks]->PERTURBED_NET(-1);
+			NETWORKS[n_networks]->PERTURBED_NET(-1);
+			_XX[N] = NETWORKS[n_networks]->YN[id][NETWORKS[n_networks]->NL - 1][0];
 			YN[id][layer][N] = _XX[N];
 		}
 	}
-
-	return _XX[0];
 }
 
-long double block_network::NET(int i, long double* SMIN, long double* SMAX, vector<long double>* XX, vector<long double>* YY) {
+void block_network::NET(int i, long double* SMIN, long double* SMAX, vector<long double>* XX, vector<long double>* YY) {
 	int id = omp_get_thread_num();
 	int BBASE = 0;
 	n_networks = 0;
@@ -1906,15 +2041,14 @@ long double block_network::NET(int i, long double* SMIN, long double* SMAX, vect
 			else
 				for (int k = 0; k < NETWORKS[n_networks]->NInputs; k++)
 					NETWORKS[n_networks]->set_rowX(k, _XX[k]);
-			_XX[N] = NETWORKS[n_networks]->NET(-1);
+			NETWORKS[n_networks]->NET(-1);
+			_XX[N] = NETWORKS[n_networks]->YN[id][NETWORKS[n_networks]->NL - 1][0];
 			YN[id][layer][N] = _XX[N];
 		}
 	}
-
-	return _XX[0];
 }
 
-vector<std::string> block_network::simplify(bool to_chain, int maxN, int NVARIANTS, const std::string& OUT_VAR, set<std::string>& defined) {
+vector<std::string> block_network::simplify(bool to_chain, int maxN, int NVARIANTS, const vector<std::string> * OUT_VAR, set<std::string>& defined) {
 	vector<std::string> result(1);
 
 	n_networks = 0;
@@ -1937,8 +2071,9 @@ vector<std::string> block_network::simplify(bool to_chain, int maxN, int NVARIAN
 		XX.clear();
 		for (int N = 0; N < NOUTS; N++, n_networks++) {
 			char buf[80];
-			std::string OUTER = std::string("OUT") + __itoa(n_networks, buf, 10);
-			vector<std::string> addition = NETWORKS[n_networks]->simplify(to_chain, maxN, 1, OUTER, defined);
+			std::string OUTER = layer == NL-1 ? OUT_VAR->at(N) : (std::string("OUT") + __itoa(n_networks, buf, 10));
+			vector<std::string> OUTERS(1, OUTER);
+			vector<std::string> addition = NETWORKS[n_networks]->simplify(to_chain, maxN, 1, &OUTERS, defined);
 			if (addition.size() == 0)
 				return vector<string>(1, "ERROR!");
 			result[0] += addition[0];
@@ -2028,11 +2163,28 @@ const string nnet::get_content() { return net->get(); }
 
 bool nnet::train(int MAX_EPOCHS) { return net->train(MAX_EPOCHS); }
 
-vector<string> nnet::simplify(bool to_chain, int maxN, set<std::string>& defined) { return net->simplify(to_chain, maxN, net->HOW_MANY, "", defined); }
+vector<string> nnet::simplify(bool to_chain, int maxN, set<std::string>& defined) {
+	vector<std::string> OUTERS;
+	for (unsigned int i = 0; i < net->nY(); i++) {
+		char buf[80];
+		std::string OUTER = std::string("OUT") + __itoa(i, buf, 10);
+		defined.insert(OUTER);
+		OUTERS.push_back(OUTER);
+	}
+	return net->simplify(to_chain, maxN, net->HOW_MANY, &OUTERS, defined);
+}
 
-long double nnet::sim() { return net->sim(); }
+void nnet::sim(long double * result) { return net->sim(result); }
 
 unsigned int nnet::nX() { return net->nX(); }
+
+unsigned int nnet::nY() {
+	return net->nY();
+}
+
+long double nnet::getY(int i) {
+	return net->getY(i);
+}
 
 void nnet::setX(unsigned int i, long double v) { net->setX(i, v); }
 
